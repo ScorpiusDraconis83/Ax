@@ -8,9 +8,12 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+
+from typing import Any
 
 import numpy as np
+import numpy.typing as npt
 import pandas as pd
 from ax.core.base_trial import BaseTrial
 from ax.core.data import Data
@@ -28,8 +31,8 @@ class NoisyFunctionMetric(Metric):
         self,
         name: str,
         param_names: list[str],
-        noise_sd: Optional[float] = 0.0,
-        lower_is_better: Optional[bool] = None,
+        noise_sd: float | None = 0.0,
+        lower_is_better: bool | None = None,
     ) -> None:
         """
         Metric is computed by evaluating a deterministic function, implemented
@@ -102,7 +105,7 @@ class NoisyFunctionMetric(Metric):
         x = np.array([params[p] for p in self.param_names])
         return self.f(x)
 
-    def f(self, x: np.ndarray) -> float:
+    def f(self, x: npt.NDArray) -> float:
         """The deterministic function that produces the metric outcomes."""
         raise NotImplementedError
 
@@ -112,8 +115,8 @@ class GenericNoisyFunctionMetric(NoisyFunctionMetric):
         self,
         name: str,
         f: Callable[[TParameterization], float],
-        noise_sd: Optional[float] = 0.0,
-        lower_is_better: Optional[bool] = None,
+        noise_sd: float | None = 0.0,
+        lower_is_better: bool | None = None,
     ) -> None:
         """
         Metric is computed by evaluating a deterministic function, implemented in f.

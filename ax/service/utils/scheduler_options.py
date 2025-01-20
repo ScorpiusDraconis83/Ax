@@ -8,7 +8,7 @@
 from dataclasses import dataclass, field
 from enum import Enum
 from logging import INFO
-from typing import Any, Optional
+from typing import Any
 
 from ax.early_stopping.strategies import BaseEarlyStoppingStrategy
 from ax.global_stopping.strategies.base import BaseGlobalStoppingStrategy
@@ -113,28 +113,41 @@ class SchedulerOptions:
         enforce_immutable_search_space_and_opt_config: Whether to enforce that the
             search space and optimization config are immutable.  If true, will add
             `"immutable_search_space_and_opt_config": True` to experiment properties
+        mt_experiment_trial_type: Type of trial to run for MultiTypeExperiments. This
+            is currently required for MultiTypeExperiments. This is ignored for
+            "regular" or single type experiments. If you don't know what a single type
+            experiment is, you don't need this.
+        force_candidate_generation: Whether to force candidate generation even if the
+            generation strategy is not ready to generate candidates, meaning one of the
+            transition criteria with block_gen_if_met is met.
+            **This is not yet implemented.**
     """
 
     max_pending_trials: int = 10
     trial_type: TrialType = TrialType.TRIAL
-    batch_size: Optional[int] = None
-    total_trials: Optional[int] = None
+    batch_size: int | None = None
+    total_trials: int | None = None
     tolerated_trial_failure_rate: float = 0.5
     min_failed_trials_for_failure_rate_check: int = 5
-    log_filepath: Optional[str] = None
+    log_filepath: str | None = None
     logging_level: int = INFO
-    ttl_seconds_for_trials: Optional[int] = None
-    init_seconds_between_polls: Optional[int] = 1
+    ttl_seconds_for_trials: int | None = None
+    init_seconds_between_polls: int | None = 1
     min_seconds_before_poll: float = 1.0
     seconds_between_polls_backoff_factor: float = 1.5
-    timeout_hours: Optional[float] = None
     run_trials_in_batches: bool = False
     debug_log_run_metadata: bool = False
-    early_stopping_strategy: Optional[BaseEarlyStoppingStrategy] = None
-    global_stopping_strategy: Optional[BaseGlobalStoppingStrategy] = None
+    early_stopping_strategy: BaseEarlyStoppingStrategy | None = None
+    global_stopping_strategy: BaseGlobalStoppingStrategy | None = None
     suppress_storage_errors_after_retries: bool = False
     wait_for_running_trials: bool = True
     fetch_kwargs: dict[str, Any] = field(default_factory=dict)
     validate_metrics: bool = True
     status_quo_weight: float = 0.0
     enforce_immutable_search_space_and_opt_config: bool = True
+    mt_experiment_trial_type: str | None = None
+    force_candidate_generation: bool = False
+
+    def __post_init__(self) -> None:
+        if self.early_stopping_strategy is not None:
+            object.__setattr__(self, "seconds_between_polls_backoff_factor", 1)

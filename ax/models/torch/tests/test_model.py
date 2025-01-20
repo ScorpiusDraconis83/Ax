@@ -7,33 +7,34 @@
 # pyre-strict
 
 import dataclasses
-from collections import OrderedDict
+from contextlib import ExitStack
 from copy import deepcopy
 from itertools import product
 from unittest import mock
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import numpy as np
 import torch
 from ax.core.search_space import SearchSpaceDigest
-from ax.exceptions.core import AxWarning, UnsupportedError
+from ax.exceptions.core import AxWarning
 from ax.models.torch.botorch_modular.acquisition import Acquisition
+from ax.models.torch.botorch_modular.kernels import ScaleMaternKernel
 from ax.models.torch.botorch_modular.model import (
     BoTorchModel,
     choose_botorch_acqf_class,
-    SurrogateSpec,
 )
-from ax.models.torch.botorch_modular.surrogate import Surrogate
+from ax.models.torch.botorch_modular.surrogate import Surrogate, SurrogateSpec
 from ax.models.torch.botorch_modular.utils import (
     choose_model_class,
     construct_acquisition_and_optimizer_options,
+    fit_botorch_model,
+    ModelConfig,
 )
-from ax.models.torch.utils import _filter_X_observed
+from ax.models.torch.utils import _filter_X_observed, predict_from_model
 from ax.models.torch_base import TorchOptConfig
 from ax.utils.common.constants import Keys
 from ax.utils.common.testutils import TestCase
-from ax.utils.common.typeutils import checked_cast
-from ax.utils.testing.mock import fast_botorch_optimize
+from ax.utils.testing.mock import mock_botorch_optimize
 from ax.utils.testing.torch_stubs import get_torch_test_data
 from botorch.acquisition import qLogNoisyExpectedImprovement
 from botorch.acquisition.input_constructors import (
@@ -53,9 +54,10 @@ from botorch.models.model import Model, ModelList
 from botorch.sampling.normal import SobolQMCNormalSampler
 from botorch.utils.constraints import get_outcome_constraint_transforms
 from botorch.utils.datasets import SupervisedDataset
+from botorch.utils.types import DEFAULT
 from gpytorch.likelihoods.gaussian_likelihood import FixedNoiseGaussianLikelihood
 from gpytorch.mlls.exact_marginal_log_likelihood import ExactMarginalLogLikelihood
-from pyre_extensions import none_throws
+from pyre_extensions import assert_is_instance, none_throws
 
 
 CURRENT_PATH: str = __name__
@@ -155,9 +157,9 @@ class BoTorchModelTest(TestCase):
                 outcome_names=[mn],
             )
             for X, Y, Yvar, mn in zip(
-                checked_cast(list, self.Xs) * 3,
+                assert_is_instance(self.Xs, list) * 3,
                 self.Ys + Ys2 + self.Ys,
-                checked_cast(list, self.Yvars) * 3,
+                assert_is_instance(self.Yvars, list) * 3,
                 self.moo_metric_names,
             )
         ]
@@ -175,6 +177,7 @@ class BoTorchModelTest(TestCase):
             objective_weights=self.moo_objective_weights,
             objective_thresholds=self.moo_objective_thresholds,
             outcome_constraints=self.moo_outcome_constraints,
+            is_moo=True,
         )
 
     def test_init(self) -> None:
@@ -201,8 +204,8 @@ class BoTorchModelTest(TestCase):
         self.assertTrue(mdl2.refit_on_cv)
         self.assertFalse(mdl2.warm_start_refit)
 
-    def test_surrogates_property(self) -> None:
-        self.assertEqual(self.surrogate, list(self.model.surrogates.values())[0])
+    def test_surrogate_property(self) -> None:
+        self.assertIs(self.surrogate, self.model.surrogate)
 
     def test_Xs_property(self) -> None:
         self.model.fit(
@@ -215,10 +218,6 @@ class BoTorchModelTest(TestCase):
         self.assertTrue(
             self.model.Xs[0].equal(torch.tensor([[1.0, 2.0, 3.0], [2.0, 3.0, 4.0]]))
         )
-
-        with self.assertRaisesRegex(NotImplementedError, "Xs not implemented"):
-            self.model._surrogates = {"foo": Surrogate(), "bar": Surrogate()}
-            self.model.Xs
 
     def test_dtype(self) -> None:
         self.model.fit(
@@ -257,9 +256,11 @@ class BoTorchModelTest(TestCase):
                 outcome_names=ds2.outcome_names,
             ),
         ]
-        with self.assertRaisesRegex(
-            UnsupportedError, "Cannot convert mixed data with and without variance"
-        ):
+        msg = (
+            "Mix of known and unknown variances indicates valuation function"
+            " errors. Variances should all be specified, or none should be."
+        )
+        with self.assertRaisesRegex(ValueError, msg):
             self.model.fit(
                 datasets=datasets,
                 search_space_digest=self.search_space_digest,
@@ -291,7 +292,7 @@ class BoTorchModelTest(TestCase):
 
     def test__construct(self) -> None:
         """Test autoset."""
-        self.model._surrogates = {}
+        self.model._surrogate = None
         with mock.patch(
             f"{SURROGATE_PATH}.choose_model_class", wraps=choose_model_class
         ) as mock_choose_model_class:
@@ -306,10 +307,12 @@ class BoTorchModelTest(TestCase):
             search_space_digest=self.mf_search_space_digest,
         )
 
+    # This mock is hard to remove since it is mocks a method on a surrogate that
+    # is only constructed when `model.fit` is called
     @mock.patch(f"{SURROGATE_PATH}.Surrogate._construct_model")
     def test_fit(self, mock_fit: Mock) -> None:
         # If surrogate is not yet set, initialize it with dispatcher functions.
-        self.model._surrogates = {}
+        self.model._surrogate = None
         with self.assertRaisesRegex(RuntimeError, "is not initialized. Must `fit`"):
             self.model.search_space_digest  # can't access before fit
 
@@ -324,149 +327,176 @@ class BoTorchModelTest(TestCase):
 
         self.assertIsInstance(self.model.search_space_digest, SearchSpaceDigest)
         self.assertEqual(self.model.search_space_digest, self.mf_search_space_digest)
-        self.assertEqual(self.model.output_order, [0])
 
         # Since we want to refit on updates but not warm start refit, we clear the
         # state dict.
         mock_fit.assert_called_with(
             dataset=self.block_design_training_data[0],
             search_space_digest=self.mf_search_space_digest,
-            botorch_model_class=SingleTaskMultiFidelityGP,
+            model_config=ModelConfig(
+                botorch_model_class=None,
+                model_options={},
+                mll_class=ExactMarginalLogLikelihood,
+                mll_options={},
+                input_transform_classes=DEFAULT,
+                input_transform_options={},
+                outcome_transform_classes=None,
+                outcome_transform_options={},
+                covar_module_class=None,
+                covar_module_options={},
+                likelihood_class=None,
+                likelihood_options={},
+                name="default",
+            ),
+            default_botorch_model_class=SingleTaskMultiFidelityGP,
             state_dict=None,
             refit=True,
         )
 
-        labels_to_outcomes = self.model.outcomes_by_surrogate_label
-        self.assertIsInstance(labels_to_outcomes, dict)
-        self.assertEqual(len(labels_to_outcomes), 1)
-        self.assertEqual(next(iter(labels_to_outcomes.values())), self.metric_names)
+    def test_predict(self) -> None:
+        with mock.patch.object(self.model._surrogate, "predict") as mock_predict:
+            self.model.predict(X=self.X_test)
+        mock_predict.assert_called_with(X=self.X_test, use_posterior_predictive=False)
+        with mock.patch.object(self.model._surrogate, "predict") as mock_predict:
+            self.model.predict(X=self.X_test, use_posterior_predictive=True)
+        mock_predict.assert_called_with(X=self.X_test, use_posterior_predictive=True)
 
-    @mock.patch(f"{SURROGATE_PATH}.Surrogate.predict")
-    def test_predict(self, mock_predict: Mock) -> None:
-        self.model.predict(X=self.X_test)
-        mock_predict.assert_called_with(X=self.X_test)
-
-    @fast_botorch_optimize
-    def test_multiple_surrogates(self) -> None:
+    def test_with_surrogate_specs_input(self) -> None:
+        spec1 = SurrogateSpec(
+            botorch_model_class=SingleTaskGP,
+            outcomes=["y1", "y3"],
+        )
         surrogate_specs = {
-            "Vanilla": SurrogateSpec(
-                botorch_model_class=SingleTaskGP,
-                outcomes=["y1", "y3"],
-            ),
+            "Vanilla": spec1,
             "Bayesian": SurrogateSpec(
                 botorch_model_class=SaasFullyBayesianSingleTaskGP,
                 outcomes=["y2"],
             ),
         }
-        model = BoTorchModel(surrogate_specs=surrogate_specs)
-        model.fit(
-            datasets=self.moo_training_data,
+        with self.assertRaisesRegex(DeprecationWarning, "Support for multiple"):
+            BoTorchModel(surrogate_specs=surrogate_specs)
+
+        with self.assertWarnsRegex(DeprecationWarning, "surrogate_specs"):
+            model = BoTorchModel(surrogate_specs={"s": spec1})
+        self.assertIs(model.surrogate_spec, spec1)
+
+    @mock_botorch_optimize
+    def test_cross_validate(self) -> None:
+        self.model.fit(
+            datasets=self.block_design_training_data,
             search_space_digest=self.search_space_digest,
             candidate_metadata=self.candidate_metadata,
         )
-        self.assertEqual(list(model.surrogates.keys()), list(surrogate_specs.keys()))
-        self.assertEqual(model.output_order, [0, 2, 1])
-        f1, cov1 = model.surrogates["Vanilla"].predict(self.X_test)
-        f2, cov2 = model.surrogates["Bayesian"].predict(self.X_test)
-        n = self.X_test.shape[0]
-        true_f = torch.zeros(n, 3, dtype=self.X_test.dtype, device=self.X_test.device)
-        true_f[:, 0] = f1[:, 0]
-        true_f[:, 2] = f1[:, 1]
-        true_f[:, 1] = f2[:, 0]
-        true_cov = torch.zeros(
-            n, 3, 3, dtype=self.X_test.dtype, device=self.X_test.device
-        )
-        for i in range(2):
-            true_cov[i, 0, 0] = cov1[i, 0, 0]
-            true_cov[i, 2, 2] = cov1[i, 1, 1]
-            true_cov[i, 1, 1] = cov2[i, 0, 0]
-        f_joint, cov_joint = model.predict(self.X_test)
-        self.assertTrue(torch.allclose(true_f, f_joint))
-        self.assertTrue(torch.allclose(true_cov, cov_joint))
 
-    @mock.patch(f"{MODEL_PATH}.BoTorchModel.fit")
-    def test_cross_validate(self, mock_fit: Mock) -> None:
-        self.model.fit(
-            datasets=self.block_design_training_data,
-            search_space_digest=self.mf_search_space_digest,
-            candidate_metadata=self.candidate_metadata,
-        )
-
-        old_surrogate = self.model.surrogates[Keys.ONLY_SURROGATE]
-        old_surrogate._model = mock.MagicMock()
-        old_surrogate._model.state_dict.return_value = OrderedDict({"key": "val"})
+        old_surrogate = self.model.surrogate
 
         for refit_on_cv, warm_start_refit, use_posterior_predictive in product(
             (True, False), (True, False), (True, False)
         ):
             self.model.refit_on_cv = refit_on_cv
             self.model.warm_start_refit = warm_start_refit
-            with mock.patch(
-                f"{SURROGATE_PATH}.Surrogate.clone_reset",
-                return_value=mock.MagicMock(spec=Surrogate),
-            ) as mock_clone_reset:
+            with ExitStack() as es:
+                mock_fit = es.enter_context(
+                    mock.patch.object(self.model, "fit", wraps=self.model.fit)
+                )
+                mock_predict_orig_surrogate = es.enter_context(
+                    mock.patch.object(
+                        self.model.surrogate,
+                        "predict",
+                        wraps=self.model.surrogate.predict,
+                    )
+                )
+                mock_predict_any_surrogate = es.enter_context(
+                    mock.patch(
+                        f"{SURROGATE_PATH}.predict_from_model", wraps=predict_from_model
+                    )
+                )
                 self.model.cross_validate(
                     datasets=self.block_design_training_data,
                     X_test=self.X_test,
-                    search_space_digest=self.mf_search_space_digest,
+                    search_space_digest=self.search_space_digest,
                     use_posterior_predictive=use_posterior_predictive,
                 )
-                # Check that `predict` is called on the cloned surrogate, not
-                # on the original one.
-                mock_predict = mock_clone_reset.return_value.predict
-                mock_predict.assert_called_once()
+            # Check that `predict` is called on the cloned surrogate, not
+            # on the original one.
+            mock_predict_orig_surrogate.assert_not_called()
+            mock_predict_any_surrogate.assert_called_once()
 
-                # Check correct X_test.
-                self.assertTrue(
-                    torch.equal(
-                        mock_predict.call_args_list[-1][1].get("X"),
-                        self.X_test,
-                    ),
-                )
-                self.assertIs(
-                    mock_predict.call_args_list[-1][1]["use_posterior_predictive"],
-                    use_posterior_predictive,
-                )
+            # Check correct X_test.
+            kwargs = mock_predict_any_surrogate.call_args.kwargs
+            self.assertTrue(torch.equal(kwargs["X"], self.X_test))
+            self.assertIs(kwargs["use_posterior_predictive"], use_posterior_predictive)
 
             # Check that surrogate is reset back to `old_surrogate` at the
             # end of cross-validation.
-            self.assertTrue(self.model.surrogates[Keys.ONLY_SURROGATE] is old_surrogate)
+            self.assertIs(self.model.surrogate, old_surrogate)
 
             expected_state_dict = (
                 None
                 if refit_on_cv and not warm_start_refit
-                else self.model.surrogates[Keys.ONLY_SURROGATE].model.state_dict()
+                else self.model.surrogate.model.state_dict()
             )
 
             # Check correct `refit` and `state_dict` values.
-            self.assertEqual(mock_fit.call_args_list[-1][1].get("refit"), refit_on_cv)
+            kwargs = mock_fit.call_args.kwargs
+            self.assertEqual(kwargs["refit"], refit_on_cv)
             if expected_state_dict is None:
-                self.assertIsNone(
-                    mock_fit.call_args_list[-1][1].get("state_dict"),
-                    expected_state_dict,
-                )
+                self.assertIsNone(kwargs["state_dict"], expected_state_dict)
             else:
                 self.assertEqual(
-                    mock_fit.call_args_list[-1][1]
-                    .get("state_dicts")
-                    .get(Keys.ONLY_SURROGATE)
-                    .keys(),
-                    expected_state_dict.keys(),
+                    kwargs["state_dict"].keys(), expected_state_dict.keys()
                 )
 
-    @fast_botorch_optimize
+    @mock_botorch_optimize
+    def test_cross_validate_multiple_configs(self) -> None:
+        """Test cross-validation with multiple configs."""
+        for refit_on_cv in (True, False):
+            with self.subTest(refit_on_cv=refit_on_cv):
+                self.model = BoTorchModel(
+                    surrogate_spec=SurrogateSpec(
+                        model_configs=[
+                            ModelConfig(),
+                            ModelConfig(
+                                botorch_model_class=SingleTaskGP,
+                                covar_module_class=ScaleMaternKernel,
+                            ),
+                        ]
+                    ),
+                    acquisition_class=self.acquisition_class,
+                    botorch_acqf_class=self.botorch_acqf_class,
+                    acquisition_options=self.acquisition_options,
+                    refit_on_cv=refit_on_cv,
+                )
+                self.model.fit(
+                    datasets=self.block_design_training_data,
+                    search_space_digest=self.search_space_digest,
+                    candidate_metadata=self.candidate_metadata,
+                )
+                with patch(
+                    f"{Surrogate.__module__}.fit_botorch_model", wraps=fit_botorch_model
+                ) as mock_fit:
+                    self.model.cross_validate(
+                        datasets=self.block_design_training_data,
+                        X_test=self.X_test,
+                        search_space_digest=self.search_space_digest,
+                    )
+                # check that we don't fit the model during cross_validation
+                if refit_on_cv:
+                    mock_fit.assert_called()
+                else:
+                    mock_fit.assert_not_called()
+
+    @mock_botorch_optimize
     @mock.patch(
         f"{MODEL_PATH}.construct_acquisition_and_optimizer_options",
         wraps=construct_acquisition_and_optimizer_options,
     )
-    @mock.patch(f"{CURRENT_PATH}.Acquisition.optimize")
     @mock.patch(
         f"{MODEL_PATH}.choose_botorch_acqf_class", wraps=choose_botorch_acqf_class
     )
     def _test_gen(
         self,
         mock_choose_botorch_acqf_class: Mock,
-        mock_optimize: Mock,
         mock_construct_options: Mock,
         botorch_model_class: type[Model],
         search_space_digest: SearchSpaceDigest,
@@ -481,7 +511,7 @@ class BoTorchModelTest(TestCase):
             acqf_cls=qLogNoisyExpectedImprovement,
             input_constructor=mock_input_constructor,
         )
-        mock_optimize.return_value = (
+        mock_optimize_return_value = (
             torch.tensor([[1.0]]),
             torch.tensor([2.0]),
             torch.tensor([1.0]),
@@ -492,11 +522,6 @@ class BoTorchModelTest(TestCase):
             acquisition_class=Acquisition,
             acquisition_options=self.acquisition_options,
         )
-        model.surrogates[Keys.ONLY_SURROGATE].fit(
-            datasets=self.block_design_training_data,
-            search_space_digest=search_space_digest,
-        )
-        model._botorch_acqf_class = None
         # Assert that error is raised if we haven't fit the model
         with self.assertRaises(RuntimeError):
             model.gen(
@@ -504,18 +529,34 @@ class BoTorchModelTest(TestCase):
                 search_space_digest=search_space_digest,
                 torch_opt_config=self.torch_opt_config,
             )
-        # Add search space digest reference to make the model think it's been fit
-        model._search_space_digest = search_space_digest
-        with mock.patch.object(
-            BoTorchModel,
-            "_instantiate_acquisition",
-            wraps=model._instantiate_acquisition,
-        ) as mock_init_acqf:
-            model.gen(
+        model.fit(
+            datasets=self.block_design_training_data,
+            search_space_digest=search_space_digest,
+        )
+        with ExitStack() as es:
+            mock_init_acqf = es.enter_context(
+                mock.patch.object(
+                    BoTorchModel,
+                    "_instantiate_acquisition",
+                    wraps=model._instantiate_acquisition,
+                )
+            )
+            mock_optimize = es.enter_context(
+                mock.patch(
+                    f"{CURRENT_PATH}.Acquisition.optimize",
+                    return_value=mock_optimize_return_value,
+                )
+            )
+
+            gen_results = model.gen(
                 n=1,
                 search_space_digest=search_space_digest,
                 torch_opt_config=self.torch_opt_config,
             )
+        self.assertEqual(
+            gen_results.gen_metadata["metric_to_model_config_name"],
+            {"y": "from deprecated args"},
+        )
         # Assert acquisition initialized with expected arguments
         mock_init_acqf.assert_called_once_with(
             search_space_digest=search_space_digest,
@@ -591,6 +632,15 @@ class BoTorchModelTest(TestCase):
             input_constructor=qLogNEI_input_constructor,
         )
 
+        # Make sure `gen` runs without mocking out Acquisition.optimize
+        with self.subTest("No mocks"):
+            gen_results = model.gen(
+                n=1,
+                search_space_digest=search_space_digest,
+                torch_opt_config=self.torch_opt_config,
+            )
+            self.assertTrue(torch.isfinite(gen_results.points).all())
+
     def test_gen_SingleTaskGP(self) -> None:
         self._test_gen(
             botorch_model_class=SingleTaskGP,
@@ -603,7 +653,7 @@ class BoTorchModelTest(TestCase):
             search_space_digest=self.mf_search_space_digest,
         )
 
-    @fast_botorch_optimize
+    @mock_botorch_optimize
     def test_feature_importances(self) -> None:
         for botorch_model_class in [SingleTaskGP, SaasFullyBayesianSingleTaskGP]:
             surrogate = Surrogate(botorch_model_class=botorch_model_class)
@@ -612,9 +662,9 @@ class BoTorchModelTest(TestCase):
                 acquisition_class=Acquisition,
                 acquisition_options=self.acquisition_options,
             )
-            model.surrogates[Keys.ONLY_SURROGATE].fit(
+            model.surrogate.fit(
                 datasets=self.block_design_training_data,
-                search_space_digest=SearchSpaceDigest(feature_names=[], bounds=[]),
+                search_space_digest=self.search_space_digest,
             )
             if botorch_model_class == SaasFullyBayesianSingleTaskGP:
                 mcmc_samples = {
@@ -625,6 +675,7 @@ class BoTorchModelTest(TestCase):
                     "mean": torch.randn(3, **self.tkwargs),
                     "noise": torch.rand(3, **self.tkwargs),
                 }
+                # pyre-fixme[29]: `Union[Tensor, Module]` is not a function.
                 model.surrogate.model.load_mcmc_samples(mcmc_samples)
                 importances = model.feature_importances()
                 self.assertTrue(
@@ -633,6 +684,8 @@ class BoTorchModelTest(TestCase):
                 self.assertEqual(importances.shape, (1, 1, 3))
                 saas_model = deepcopy(model.surrogate.model)
             else:
+                # pyre-fixme[16]: `Tensor` has no attribute `lengthscale`.
+                # pyre-fixme[16]: `Module` has no attribute `lengthscale`.
                 model.surrogate.model.covar_module.lengthscale = torch.tensor(
                     [1, 2, 3], **self.tkwargs
                 )
@@ -671,17 +724,10 @@ class BoTorchModelTest(TestCase):
             ValueError, "BoTorch `Model` has not yet been constructed"
         ):
             model.feature_importances()
-        # Test unsupported surrogate
-        model._surrogates = {"vanilla": None, "saas": None}
-        with self.assertRaisesRegex(
-            NotImplementedError,
-            "feature_importances not implemented for multi-surrogate case",
-        ):
-            model.feature_importances()
 
-    @fast_botorch_optimize
+    @mock_botorch_optimize
     def test_best_point(self) -> None:
-        self.model._surrogates = {}
+        self.model._surrogate = None
         self.model.fit(
             datasets=self.block_design_training_data,
             search_space_digest=self.mf_search_space_digest,
@@ -708,132 +754,68 @@ class BoTorchModelTest(TestCase):
                 ),
             )
 
-    @fast_botorch_optimize
-    @mock.patch(
-        f"{MODEL_PATH}.construct_acquisition_and_optimizer_options",
-        return_value=({"num_fantasies": 64}, {"num_restarts": 40, "raw_samples": 1024}),
-    )
-    @mock.patch(f"{CURRENT_PATH}.Acquisition", autospec=True)
-    def test_evaluate_acquisition_function(
-        self, mock_acquisition: Mock, _mock_construct_options: Mock
-    ) -> None:
+    @mock_botorch_optimize
+    def test_evaluate_acquisition_function(self) -> None:
         model = BoTorchModel(
             surrogate=self.surrogate,
             acquisition_class=Acquisition,
             acquisition_options=self.acquisition_options,
         )
-        model.surrogates[Keys.ONLY_SURROGATE].fit(
+        model.surrogate.fit(
             datasets=self.block_design_training_data,
-            search_space_digest=SearchSpaceDigest(
-                feature_names=[],
-                bounds=[],
-            ),
+            search_space_digest=self.search_space_digest,
         )
-        model.evaluate_acquisition_function(
+        points = model.evaluate_acquisition_function(
             X=self.X_test,
             search_space_digest=self.search_space_digest,
             torch_opt_config=self.torch_opt_config,
             acq_options=self.acquisition_options,
         )
+        self.assertEqual(points.shape, torch.Size([1]))
         # testing that the new setup chooses qLogNEI by default
         self.assertEqual(model._botorch_acqf_class, qLogNoisyExpectedImprovement)
-        # `mock_acquisition` is a mock of the Acquisition class, so to check the mock's
-        # `evaluate` on an instance of that class, we use
-        # `mock_acquisition.return_value.evaluate`.
-        mock_acquisition.return_value.evaluate.assert_called()
 
-    @mock.patch(f"{MODEL_PATH}.Surrogate", wraps=Surrogate)
-    @mock.patch(f"{SURROGATE_PATH}.Surrogate._construct_model", return_value=None)
-    @mock.patch(f"{SURROGATE_PATH}.ModelListGP")
-    def test_surrogate_model_options_propagation(
-        self, _m1: Mock, _m2: Mock, mock_init: Mock
-    ) -> None:
-        model = BoTorchModel(
-            surrogate_specs={
-                "name": SurrogateSpec(
-                    botorch_model_kwargs={"some_option": "some_value"}
-                )
-            }
-        )
-        model.fit(
-            datasets=self.non_block_design_training_data,
-            search_space_digest=self.mf_search_space_digest,
-            candidate_metadata=self.candidate_metadata,
-        )
-        mock_init.assert_called_with(
-            botorch_model_class=None,
-            model_options={"some_option": "some_value"},
-            mll_class=ExactMarginalLogLikelihood,
-            mll_options={},
-            covar_module_class=None,
-            covar_module_options=None,
-            likelihood_class=None,
-            likelihood_options=None,
-            input_transform_classes=None,
-            input_transform_options=None,
-            outcome_transform_classes=None,
-            outcome_transform_options=None,
-            allow_batched_models=True,
-        )
+    @mock_botorch_optimize
+    def test_surrogate_model_options_propagation(self) -> None:
+        surrogate_spec = SurrogateSpec()
+        model = BoTorchModel(surrogate_spec=surrogate_spec)
+        with mock.patch(f"{MODEL_PATH}.Surrogate", wraps=Surrogate) as mock_init:
+            model.fit(
+                datasets=self.non_block_design_training_data,
+                search_space_digest=self.mf_search_space_digest,
+                candidate_metadata=self.candidate_metadata,
+            )
+        mock_init.assert_called_with(surrogate_spec=surrogate_spec, refit_on_cv=False)
 
-    @mock.patch(f"{MODEL_PATH}.Surrogate", wraps=Surrogate)
-    @mock.patch(f"{SURROGATE_PATH}.Surrogate._construct_model", return_value=None)
-    @mock.patch(f"{SURROGATE_PATH}.ModelListGP")
-    def test_surrogate_options_propagation(
-        self, _m1: Mock, _m2: Mock, mock_init: Mock
-    ) -> None:
-        model = BoTorchModel(
-            surrogate_specs={"name": SurrogateSpec(allow_batched_models=False)}
-        )
-        model.fit(
-            datasets=self.non_block_design_training_data,
-            search_space_digest=self.mf_search_space_digest,
-            candidate_metadata=self.candidate_metadata,
-        )
-        mock_init.assert_called_with(
-            botorch_model_class=None,
-            model_options={},
-            mll_class=ExactMarginalLogLikelihood,
-            mll_options={},
-            covar_module_class=None,
-            covar_module_options=None,
-            likelihood_class=None,
-            likelihood_options=None,
-            input_transform_classes=None,
-            input_transform_options=None,
-            outcome_transform_classes=None,
-            outcome_transform_options=None,
-            allow_batched_models=False,
-        )
+    @mock_botorch_optimize
+    def test_surrogate_options_propagation(self) -> None:
+        surrogate_spec = SurrogateSpec(allow_batched_models=False)
+        model = BoTorchModel(surrogate_spec=surrogate_spec)
+        with mock.patch(f"{MODEL_PATH}.Surrogate", wraps=Surrogate) as mock_init:
+            model.fit(
+                datasets=self.non_block_design_training_data,
+                search_space_digest=self.mf_search_space_digest,
+                candidate_metadata=self.candidate_metadata,
+            )
+        mock_init.assert_called_with(surrogate_spec=surrogate_spec, refit_on_cv=False)
 
-    @mock.patch(
-        f"{ACQUISITION_PATH}.Acquisition.optimize",
-        # Dummy candidates and acquisition function value.
-        return_value=(torch.tensor([[2.0]]), torch.tensor([1.0])),
-    )
-    def test_model_list_choice(self, _) -> None:  # , mock_extract_training_data):
+    @mock_botorch_optimize
+    def test_model_list_choice(self) -> None:
         model = BoTorchModel()
         model.fit(
             datasets=self.non_block_design_training_data,
             search_space_digest=self.mf_search_space_digest,
             candidate_metadata=self.candidate_metadata,
         )
-        self.assertEqual(model.output_order, [0, 1])
         # A model list should be chosen, since Xs are not all the same.
-        model_list = checked_cast(
-            ModelList, model.surrogates[Keys.AUTOSET_SURROGATE].model
-        )
+        model_list = assert_is_instance(model.surrogate.model, ModelList)
         for submodel in model_list.models:
             # There are fidelity features and nonempty Yvars, so
             # MFGP should be chosen.
             self.assertIsInstance(submodel, SingleTaskMultiFidelityGP)
 
-    @mock.patch(
-        f"{ACQUISITION_PATH}.Acquisition.optimize",
-        # Dummy candidates, acquisition value, and weights
-        return_value=(torch.tensor([[2.0]]), torch.tensor([1.0]), torch.tensor([1.0])),
-    )
-    def test_MOO(self, _) -> None:
+    @mock_botorch_optimize
+    def test_MOO(self) -> None:
         # Add mock for qLogNEHVI input constructor to catch arguments passed to it.
         qLogNEHVI_input_constructor = get_acqf_input_constructor(
             qLogNoisyExpectedHypervolumeImprovement
@@ -852,9 +834,7 @@ class BoTorchModelTest(TestCase):
             search_space_digest=self.search_space_digest,
             candidate_metadata=self.candidate_metadata,
         )
-        self.assertIsInstance(
-            model.surrogates[Keys.AUTOSET_SURROGATE].model, SingleTaskGP
-        )
+        self.assertIsInstance(model.surrogate.model, SingleTaskGP)
         subset_outcome_constraints = (
             # model is subset since last output is not used
             self.moo_outcome_constraints[0][:, :2],
@@ -866,6 +846,7 @@ class BoTorchModelTest(TestCase):
         with mock.patch(
             f"{ACQUISITION_PATH}.get_outcome_constraint_transforms",
             # Dummy candidates and acquisition function value.
+            # This will return the same value as the original
             return_value=constraints,
         ) as mock_get_outcome_constraint_transforms:
             gen_results = model.gen(
@@ -874,13 +855,13 @@ class BoTorchModelTest(TestCase):
                 torch_opt_config=self.moo_torch_opt_config,
             )
         mock_get_outcome_constraint_transforms.assert_called_once()
-        ckwargs = mock_get_outcome_constraint_transforms.call_args[1]
+        ckwargs = mock_get_outcome_constraint_transforms.call_args.kwargs
         oc = ckwargs["outcome_constraints"]
         self.assertTrue(torch.equal(oc[0], subset_outcome_constraints[0]))
         self.assertTrue(torch.equal(oc[1], subset_outcome_constraints[1]))
 
         # Check input constructor args
-        ckwargs = mock_input_constructor.call_args[1]
+        ckwargs = mock_input_constructor.call_args.kwargs
         expected_kwargs = {
             "constraints",
             "bounds",
@@ -963,9 +944,10 @@ class BoTorchModelTest(TestCase):
             linear_constraints=linear_constraints,
         )
 
+        objective_thresholds = torch.tensor([9.9, 3.3, float("nan")])
         with mock.patch(
-            "ax.models.torch.botorch_modular.acquisition." "infer_objective_thresholds",
-            return_value=torch.tensor([9.9, 3.3, float("nan")]),
+            "ax.models.torch.botorch_modular.acquisition.infer_objective_thresholds",
+            return_value=objective_thresholds,
         ) as _mock_model_infer_objective_thresholds:
             gen_results = model.gen(
                 n=1,
@@ -996,7 +978,7 @@ class BoTorchModelTest(TestCase):
         self.assertEqual(m.num_outputs, 2)
         self.assertIn("objective_thresholds", gen_results.gen_metadata)
         obj_t = gen_results.gen_metadata["objective_thresholds"]
-        self.assertTrue(torch.equal(obj_t[:2], torch.tensor([9.9, 3.3])))
+        self.assertTrue(torch.equal(obj_t[:2], objective_thresholds[:2]))
         self.assertTrue(np.isnan(obj_t[2].item()))
 
         # Avoid polluting the registry for other tests; re-register correct input

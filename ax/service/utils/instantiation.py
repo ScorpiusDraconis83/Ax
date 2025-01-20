@@ -12,12 +12,13 @@ from copy import deepcopy
 from dataclasses import dataclass
 
 from logging import Logger
-from typing import Any, Optional, Union
+from typing import Any, Union
 
 from ax.core.arm import Arm
 from ax.core.auxiliary import AuxiliaryExperiment, AuxiliaryExperimentPurpose
 from ax.core.experiment import DataType, Experiment
 from ax.core.metric import Metric
+from ax.core.multi_type_experiment import MultiTypeExperiment
 from ax.core.objective import MultiObjective, Objective
 from ax.core.observation import ObservationFeatures
 from ax.core.optimization_config import (
@@ -35,18 +36,22 @@ from ax.core.parameter import (
     RangeParameter,
     TParameterType,
 )
-from ax.core.parameter_constraint import OrderConstraint, ParameterConstraint
+from ax.core.parameter_constraint import (
+    OrderConstraint,
+    ParameterConstraint,
+    validate_constraint_parameters,
+)
+from ax.core.runner import Runner
 from ax.core.search_space import HierarchicalSearchSpace, SearchSpace
 from ax.core.types import ComparisonOp, TParameterization, TParamValue
 from ax.exceptions.core import UnsupportedError
 from ax.utils.common.constants import Keys
 from ax.utils.common.logger import get_logger
 from ax.utils.common.typeutils import (
-    checked_cast,
-    checked_cast_optional,
-    checked_cast_to_tuple,
-    not_none,
+    assert_is_instance_of_tuple,
+    assert_is_instance_optional,
 )
+from pyre_extensions import assert_is_instance, none_throws
 
 DEFAULT_OBJECTIVE_NAME = "objective"
 
@@ -114,7 +119,7 @@ class ObjectiveProperties:
     """
 
     minimize: bool
-    threshold: Optional[float] = None
+    threshold: float | None = None
 
 
 @dataclass(frozen=True)
@@ -122,7 +127,7 @@ class FixedFeatures:
     """Class for representing fixed features via the Service API."""
 
     parameters: TParameterization
-    trial_index: Optional[int] = None
+    trial_index: int | None = None
 
 
 class InstantiationBase:
@@ -136,8 +141,8 @@ class InstantiationBase:
     def _get_deserialized_metric_kwargs(
         metric_class: type[Metric],
         name: str,
-        metric_definitions: Optional[dict[str, dict[str, Any]]],
-    ) -> dict[str, Any]:
+        metric_definitions: dict[str, dict[str, Any]] | None,
+    ) -> tuple[type[Metric], dict[str, Any]]:
         """Get metric kwargs from metric_definitions if available and deserialize
         if so.  Deserialization is necessary because they were serialized on creation"""
         # deepcopy is used because of subsequent modifications to the dict
@@ -146,23 +151,26 @@ class InstantiationBase:
         # this is necessary before deserialization because name will be required
         metric_kwargs["name"] = metric_kwargs.get("name", name)
         metric_kwargs = metric_class.deserialize_init_args(metric_kwargs)
-        return metric_kwargs
+        return metric_class, metric_kwargs
 
     @classmethod
     def _make_metric(
         cls,
         name: str,
-        lower_is_better: Optional[bool] = None,
+        lower_is_better: bool | None = None,
         metric_class: type[Metric] = Metric,
         for_opt_config: bool = False,
-        metric_definitions: Optional[dict[str, dict[str, Any]]] = None,
+        metric_definitions: dict[str, dict[str, Any]] | None = None,
     ) -> Metric:
         if " " in name:
             raise ValueError(
                 "Metric names cannot contain spaces when used with AxClient. Got "
                 f"{name!r}."
             )
-        kwargs = cls._get_deserialized_metric_kwargs(
+
+        metric_definitions = metric_definitions or {}
+
+        metric_class, kwargs = cls._get_deserialized_metric_kwargs(
             name=name,
             metric_definitions=metric_definitions,
             metric_class=metric_class,
@@ -184,12 +192,12 @@ class InstantiationBase:
     def _to_parameter_type(
         cls,
         vals: list[TParamValue],
-        typ: Optional[str],
+        typ: str | None,
         param_name: str,
         field_name: str,
     ) -> ParameterType:
         if typ is None:
-            typ = type(not_none(vals[0]))
+            typ = type(none_throws(vals[0]))
             parameter_type = cls._get_parameter_type(typ)  # pyre-ignore[6]
             assert all(isinstance(x, typ) for x in vals), (
                 f"Values in `{field_name}` not of the same type and no "
@@ -209,7 +217,7 @@ class InstantiationBase:
         cls,
         name: str,
         representation: TParameterRepresentation,
-        parameter_type: Optional[str],
+        parameter_type: str | None,
     ) -> RangeParameter:
         assert "bounds" in representation, "Bounds are required for range parameters."
         bounds = representation["bounds"]
@@ -222,11 +230,13 @@ class InstantiationBase:
             parameter_type=cls._to_parameter_type(
                 bounds, parameter_type, name, "bounds"
             ),
-            lower=checked_cast_to_tuple((float, int), bounds[0]),
-            upper=checked_cast_to_tuple((float, int), bounds[1]),
-            log_scale=checked_cast(bool, representation.get("log_scale", False)),
+            lower=assert_is_instance_of_tuple(bounds[0], (float, int)),
+            upper=assert_is_instance_of_tuple(bounds[1], (float, int)),
+            log_scale=assert_is_instance(representation.get("log_scale", False), bool),
             digits=representation.get("digits", None),  # pyre-ignore[6]
-            is_fidelity=checked_cast(bool, representation.get("is_fidelity", False)),
+            is_fidelity=assert_is_instance(
+                representation.get("is_fidelity", False), bool
+            ),
             # pyre-ignore[6]: Expected `Union[None, bool, float, int, str]`
             #  for 8th param but got `Union[None, List[
             #  Union[None, bool, float, int, str]], bool, float, int, str]`.
@@ -238,7 +248,7 @@ class InstantiationBase:
         cls,
         name: str,
         representation: TParameterRepresentation,
-        parameter_type: Optional[str],
+        parameter_type: str | None,
     ) -> ChoiceParameter:
         values = representation["values"]
         assert isinstance(values, list) and len(values) > 1, (
@@ -251,15 +261,19 @@ class InstantiationBase:
                 values, parameter_type, name, "values"
             ),
             values=values,
-            is_ordered=checked_cast_optional(bool, representation.get("is_ordered")),
-            is_fidelity=checked_cast(bool, representation.get("is_fidelity", False)),
-            is_task=checked_cast(bool, representation.get("is_task", False)),
-            target_value=representation.get("target_value", None),  # pyre-ignore[6]
-            sort_values=checked_cast_optional(
-                bool, representation.get("sort_values", None)
+            is_ordered=assert_is_instance_optional(
+                representation.get("is_ordered"), bool
             ),
-            dependents=checked_cast_optional(
-                dict, representation.get("dependents", None)
+            is_fidelity=assert_is_instance(
+                representation.get("is_fidelity", False), bool
+            ),
+            is_task=assert_is_instance(representation.get("is_task", False), bool),
+            target_value=representation.get("target_value", None),  # pyre-ignore[6]
+            sort_values=assert_is_instance_optional(
+                representation.get("sort_values", None), bool
+            ),
+            dependents=assert_is_instance_optional(
+                representation.get("dependents", None), dict
             ),
         )
 
@@ -268,7 +282,7 @@ class InstantiationBase:
         cls,
         name: str,
         representation: TParameterRepresentation,
-        parameter_type: Optional[str],
+        parameter_type: str | None,
     ) -> FixedParameter:
         assert "value" in representation, "Value is required for fixed parameters."
         value = representation["value"]
@@ -285,7 +299,9 @@ class InstantiationBase:
                 else cls._get_parameter_type(PARAM_TYPES[parameter_type])
             ),
             value=value,  # pyre-ignore[6]
-            is_fidelity=checked_cast(bool, representation.get("is_fidelity", False)),
+            is_fidelity=assert_is_instance(
+                representation.get("is_fidelity", False), bool
+            ),
             target_value=representation.get("target_value", None),  # pyre-ignore[6]
             dependents=representation.get("dependents", None),  # pyre-ignore[6]
         )
@@ -403,6 +419,9 @@ class InstantiationBase:
             assert (
                 right in parameter_names
             ), f"Parameter {right} not in {parameter_names}."
+            validate_constraint_parameters(
+                parameters=[parameters[left], parameters[right]]
+            )
             return (
                 OrderConstraint(
                     lower_parameter=parameters[left], upper_parameter=parameters[right]
@@ -451,9 +470,12 @@ class InstantiationBase:
                         multiplier = -1.0
                     else:
                         multiplier = 1.0
+
                 assert (
                     parameter in parameter_names
                 ), f"Parameter {parameter} not in {parameter_names}."
+                validate_constraint_parameters(parameters=[parameters[parameter]])
+
                 parameter_weight[parameter] = operator_sign * multiplier
             # for operators
             else:
@@ -472,12 +494,13 @@ class InstantiationBase:
     def outcome_constraint_from_str(
         cls,
         representation: str,
-        metric_definitions: Optional[dict[str, dict[str, Any]]] = None,
+        metric_definitions: dict[str, dict[str, Any]] | None = None,
     ) -> OutcomeConstraint:
         """Parse string representation of an outcome constraint."""
         tokens = representation.split()
         assert len(tokens) == 3 and tokens[1] in COMPARISON_OPS, (
-            "Outcome constraint should be of form `metric_name >= x`, where x is a "
+            f"Outcome constraint '{representation}' should be of "
+            "form `metric_name >= x`, where x is a "
             "float bound and comparison operator is >= or <=."
         )
         op = COMPARISON_OPS[tokens[1]]
@@ -489,7 +512,9 @@ class InstantiationBase:
                 bound_repr = bound_repr[:-1]
             bound = float(bound_repr)
         except ValueError:
-            raise ValueError("Outcome constraint bound should be a float.")
+            raise ValueError(
+                f"Outcome constraint bound should be a float for '{representation}'."
+            )
         return OutcomeConstraint(
             cls._make_metric(
                 name=tokens[0],
@@ -506,7 +531,7 @@ class InstantiationBase:
     def objective_threshold_constraint_from_str(
         cls,
         representation: str,
-        metric_definitions: Optional[dict[str, dict[str, Any]]] = None,
+        metric_definitions: dict[str, dict[str, Any]] | None = None,
     ) -> ObjectiveThreshold:
         oc = cls.outcome_constraint_from_str(
             representation, metric_definitions=metric_definitions
@@ -522,7 +547,7 @@ class InstantiationBase:
     def make_objectives(
         cls,
         objectives: dict[str, str],
-        metric_definitions: Optional[dict[str, dict[str, Any]]] = None,
+        metric_definitions: dict[str, dict[str, Any]] | None = None,
     ) -> list[Objective]:
         try:
             output_objectives = []
@@ -554,9 +579,8 @@ class InstantiationBase:
         cls,
         outcome_constraints: list[str],
         status_quo_defined: bool,
-        metric_definitions: Optional[dict[str, dict[str, Any]]] = None,
+        metric_definitions: dict[str, dict[str, Any]] | None = None,
     ) -> list[OutcomeConstraint]:
-
         typed_outcome_constraints = [
             cls.outcome_constraint_from_str(c, metric_definitions=metric_definitions)
             for c in outcome_constraints
@@ -576,9 +600,8 @@ class InstantiationBase:
         cls,
         objective_thresholds: list[str],
         status_quo_defined: bool,
-        metric_definitions: Optional[dict[str, dict[str, Any]]] = None,
+        metric_definitions: dict[str, dict[str, Any]] | None = None,
     ) -> list[ObjectiveThreshold]:
-
         typed_objective_thresholds = (
             [
                 cls.objective_threshold_constraint_from_str(
@@ -644,9 +667,8 @@ class InstantiationBase:
         objective_thresholds: list[str],
         outcome_constraints: list[str],
         status_quo_defined: bool,
-        metric_definitions: Optional[dict[str, dict[str, Any]]] = None,
+        metric_definitions: dict[str, dict[str, Any]] | None = None,
     ) -> OptimizationConfig:
-
         return cls.optimization_config_from_objectives(
             cls.make_objectives(objectives, metric_definitions=metric_definitions),
             cls.make_objective_thresholds(
@@ -664,11 +686,11 @@ class InstantiationBase:
     @classmethod
     def make_optimization_config_from_properties(
         cls,
-        objectives: Optional[dict[str, ObjectiveProperties]] = None,
-        outcome_constraints: Optional[list[str]] = None,
-        metric_definitions: Optional[dict[str, dict[str, Any]]] = None,
+        objectives: dict[str, ObjectiveProperties] | None = None,
+        outcome_constraints: list[str] | None = None,
+        metric_definitions: dict[str, dict[str, Any]] | None = None,
         status_quo_defined: bool = False,
-    ) -> Optional[OptimizationConfig]:
+    ) -> OptimizationConfig | None:
         """Makes optimization config based on ObjectiveProperties objects
 
         Args:
@@ -704,7 +726,7 @@ class InstantiationBase:
     def make_search_space(
         cls,
         parameters: list[TParameterRepresentation],
-        parameter_constraints: Optional[list[str]],
+        parameter_constraints: list[str] | None,
     ) -> SearchSpace:
         parameter_constraints = (
             parameter_constraints if parameter_constraints is not None else []
@@ -750,7 +772,7 @@ class InstantiationBase:
 
         logger.info(f"Created search space: {ss}.")
         if is_hss:
-            hss = checked_cast(HierarchicalSearchSpace, ss)
+            hss = assert_is_instance(ss, HierarchicalSearchSpace)
             logger.info(
                 "Hieararchical structure of the search space: \n"
                 f"{hss.hierarchical_structure_str(parameter_names_only=True)}"
@@ -762,7 +784,7 @@ class InstantiationBase:
         )
 
     @classmethod
-    def _get_default_objectives(cls) -> Optional[dict[str, str]]:
+    def _get_default_objectives(cls) -> dict[str, str] | None:
         """Get the default objective and its optimization direction.
 
         The return type is optional since some subclasses may not wish to
@@ -774,22 +796,23 @@ class InstantiationBase:
     def make_experiment(
         cls,
         parameters: list[TParameterRepresentation],
-        name: Optional[str] = None,
-        description: Optional[str] = None,
-        owners: Optional[list[str]] = None,
-        parameter_constraints: Optional[list[str]] = None,
-        outcome_constraints: Optional[list[str]] = None,
-        status_quo: Optional[TParameterization] = None,
-        experiment_type: Optional[str] = None,
-        tracking_metric_names: Optional[list[str]] = None,
-        metric_definitions: Optional[dict[str, dict[str, Any]]] = None,
-        objectives: Optional[dict[str, str]] = None,
-        objective_thresholds: Optional[list[str]] = None,
+        name: str | None = None,
+        description: str | None = None,
+        owners: list[str] | None = None,
+        parameter_constraints: list[str] | None = None,
+        outcome_constraints: list[str] | None = None,
+        status_quo: TParameterization | None = None,
+        experiment_type: str | None = None,
+        tracking_metric_names: list[str] | None = None,
+        metric_definitions: dict[str, dict[str, Any]] | None = None,
+        objectives: dict[str, str] | None = None,
+        objective_thresholds: list[str] | None = None,
         support_intermediate_data: bool = False,
         immutable_search_space_and_opt_config: bool = True,
-        auxiliary_experiments_by_purpose: Optional[
-            dict[AuxiliaryExperimentPurpose, list[AuxiliaryExperiment]]
-        ] = None,
+        auxiliary_experiments_by_purpose: None
+        | (dict[AuxiliaryExperimentPurpose, list[AuxiliaryExperiment]]) = None,
+        default_trial_type: str | None = None,
+        default_runner: Runner | None = None,
         is_test: bool = False,
     ) -> Experiment:
         """Instantiation wrapper that allows for Ax `Experiment` creation
@@ -845,10 +868,23 @@ class InstantiationBase:
                 improve storage performance.
             auxiliary_experiments_by_purpose: Dictionary of auxiliary experiments for
                 different use cases (e.g., transfer learning).
+            default_trial_type: The default trial type if multiple
+                trial types are intended to be used in the experiment.  If specified,
+                a MultiTypeExperiment will be created. Otherwise, a single-type
+                Experiment will be created.
+            default_runner: The default runner in this experiment.
+                This only applies to MultiTypeExperiment (when default_trial_type
+                is specified).
             is_test: Whether this experiment will be a test experiment (useful for
                 marking test experiments in storage etc). Defaults to False.
 
         """
+        if (default_trial_type is None) != (default_runner is None):
+            raise ValueError(
+                "Must specify both default_trial_type and default_runner if "
+                "using a MultiTypeExperiment."
+            )
+
         status_quo_arm = None if status_quo is None else Arm(parameters=status_quo)
 
         objectives = objectives or cls._get_default_objectives()
@@ -887,6 +923,21 @@ class InstantiationBase:
 
         if owners is not None:
             properties["owners"] = owners
+        if default_trial_type is not None:
+            return MultiTypeExperiment(
+                name=none_throws(name),
+                search_space=cls.make_search_space(parameters, parameter_constraints),
+                default_trial_type=none_throws(default_trial_type),
+                default_runner=none_throws(default_runner),
+                optimization_config=optimization_config,
+                tracking_metrics=tracking_metrics,
+                status_quo=status_quo_arm,
+                description=description,
+                is_test=is_test,
+                experiment_type=experiment_type,
+                properties=properties,
+                default_data_type=default_data_type,
+            )
 
         return Experiment(
             name=name,

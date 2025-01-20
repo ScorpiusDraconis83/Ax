@@ -9,6 +9,7 @@
 from typing import Any, Optional, TYPE_CHECKING
 
 import numpy as np
+import numpy.typing as npt
 from ax.core.observation import Observation, ObservationFeatures
 from ax.core.parameter import ChoiceParameter, Parameter, ParameterType, RangeParameter
 from ax.core.search_space import SearchSpace
@@ -52,10 +53,10 @@ class ChoiceToNumericChoice(Transform):
 
     def __init__(
         self,
-        search_space: Optional[SearchSpace] = None,
-        observations: Optional[list[Observation]] = None,
+        search_space: SearchSpace | None = None,
+        observations: list[Observation] | None = None,
         modelbridge: Optional["modelbridge_module.base.ModelBridge"] = None,
-        config: Optional[TConfig] = None,
+        config: TConfig | None = None,
     ) -> None:
         assert search_space is not None, "ChoiceToNumericChoice requires search space"
         # Identify parameters that should be transformed
@@ -120,7 +121,8 @@ class ChoiceToNumericChoice(Transform):
                     # pyre: pval is declared to have type `int` but is used as
                     # pyre-fixme[9]: type `Union[bool, float, str]`.
                     pval: int = obsf.parameters[p_name]
-                    obsf.parameters[p_name] = reverse_transform[pval]
+                    if pval in reverse_transform:
+                        obsf.parameters[p_name] = reverse_transform[pval]
         return observation_features
 
 
@@ -151,7 +153,7 @@ class OrderedChoiceToIntegerRange(ChoiceToNumericChoice):
         search_space: SearchSpace,
         observations: list[Observation],
         modelbridge: Optional["modelbridge_module.base.ModelBridge"] = None,
-        config: Optional[TConfig] = None,
+        config: TConfig | None = None,
     ) -> None:
         # Identify parameters that should be transformed
         self.encoded_parameters: dict[str, dict[TParamValue, int]] = {}
@@ -177,12 +179,32 @@ class OrderedChoiceToIntegerRange(ChoiceToNumericChoice):
                     raise ValueError(
                         f"Cannot choice-encode fidelity parameter {p_name}"
                     )
-                # Choice(|K|) => Range(0, K-1)
+                # Make sure that the search space is compatible with the encoding.
+                encoding = self.encoded_parameters[p_name]
+                try:
+                    t_values = [encoding[pv] for pv in p.values]
+                except KeyError:
+                    raise ValueError(
+                        f"The parameter {p} contains values that are not present in "
+                        "the search space used to initialize the transform. The "
+                        f"supported encoding for the parameter {p_name} is {encoding}."
+                    )
+                min_val = min(t_values)
+                len_val = len(t_values)
+                # Ensure that the values span a contiguous range.
+                if set(t_values) != set(range(min_val, min_val + len_val)):
+                    raise ValueError(
+                        f"The {self.__class__.__name__} transform requires the "
+                        "parameter to be encoded with a contiguous range of integers. "
+                        f"The parameter {p} maps to {t_values}, which does not span "
+                        f"a contiguous range of integers. For parameter {p_name}, "
+                        f"the transform uses {encoding=}."
+                    )
                 transformed_parameters[p_name] = RangeParameter(
                     name=p_name,
                     parameter_type=ParameterType.INT,
-                    lower=0,
-                    upper=len(p.values) - 1,
+                    lower=min_val,
+                    upper=min_val + len_val - 1,
                 )
             else:
                 transformed_parameters[p.name] = p
@@ -205,7 +227,7 @@ class OrderedChoiceEncode(DeprecatedTransformMixin, OrderedChoiceToIntegerRange)
         super().__init__(*args, **kwargs)
 
 
-def transform_choice_values(p: ChoiceParameter) -> tuple[np.ndarray, ParameterType]:
+def transform_choice_values(p: ChoiceParameter) -> tuple[npt.NDArray, ParameterType]:
     """Transforms the choice values and returns the new parameter type.
 
     If the choices were numeric (int or float) and ordered, then they're cast

@@ -14,7 +14,7 @@ from ax.core.search_space import SearchSpace
 from ax.modelbridge.transforms.base import Transform
 from ax.models.types import TConfig
 from ax.utils.common.docutils import copy_doc
-from ax.utils.common.typeutils import not_none
+from pyre_extensions import none_throws
 
 if TYPE_CHECKING:
     # import as module to make sphinx-autodoc-typehints happy
@@ -39,10 +39,10 @@ class ConvertMetricNames(Transform):
 
     def __init__(
         self,
-        search_space: Optional[SearchSpace] = None,
-        observations: Optional[list[Observation]] = None,
+        search_space: SearchSpace | None = None,
+        observations: list[Observation] | None = None,
         modelbridge: Optional["modelbridge_module.base.ModelBridge"] = None,
-        config: Optional[TConfig] = None,
+        config: TConfig | None = None,
     ) -> None:
         assert observations is not None, "ConvertMetricNames requires observations"
         if config is None:
@@ -105,7 +105,7 @@ class ConvertMetricNames(Transform):
         if not self.perform_untransform:
             return observations
         for obs in observations:
-            trial_index = int(not_none(obs.features.trial_index))
+            trial_index = int(none_throws(obs.features.trial_index))
             trial_type = self.trial_index_to_type[trial_index]
             reverse_map = self.reverse_metric_name_map.get(trial_type)
 

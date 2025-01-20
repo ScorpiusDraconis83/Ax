@@ -100,7 +100,6 @@ class TestWithDBSettingsBase(TestCase):
         return experiment, generation_strategy
 
     def test_get_experiment_and_generation_strategy_db_id(self) -> None:
-
         (
             exp_id,
             gen_id,
@@ -298,8 +297,6 @@ class TestWithDBSettingsBase(TestCase):
 
         self.with_db_settings._save_or_update_trials_in_db_if_possible(
             experiment=experiment,
-            # pyre-fixme[6]: For 2nd param expected `List[BaseTrial]` but got
-            #  `List[Trial]`.
             trials=trials,
         )
         loaded_experiment = _load_experiment(

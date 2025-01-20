@@ -7,7 +7,7 @@
 # pyre-strict
 
 from math import ceil
-from typing import Any, cast, Optional
+from typing import Any, cast
 
 from ax.analysis.analysis import AnalysisCard
 
@@ -35,7 +35,7 @@ from ax.storage.sqa_store.sqa_config import SQAConfig
 
 from ax.storage.utils import MetricIntent
 from ax.utils.common.constants import Keys
-from ax.utils.common.typeutils import checked_cast, not_none
+from pyre_extensions import assert_is_instance, none_throws
 from sqlalchemy.orm import defaultload, lazyload, noload
 from sqlalchemy.orm.exc import DetachedInstanceError
 
@@ -45,10 +45,11 @@ from sqlalchemy.orm.exc import DetachedInstanceError
 
 def load_experiment(
     experiment_name: str,
-    config: Optional[SQAConfig] = None,
+    config: SQAConfig | None = None,
     reduced_state: bool = False,
-    load_trials_in_batches_of_size: Optional[int] = None,
+    load_trials_in_batches_of_size: int | None = None,
     skip_runners_and_metrics: bool = False,
+    load_auxiliary_experiments: bool = True,
 ) -> Experiment:
     """Load experiment by name.
 
@@ -57,7 +58,7 @@ def load_experiment(
         config: `SQAConfig`, from which to retrieve the decoder. Optional,
             defaults to base `SQAConfig`.
         reduced_state: Whether to load experiment with a slightly reduced state
-            (without abandoned arms on experiment and withoug model state,
+            (without abandoned arms on experiment and without model state,
             search space, and optimization config on generator runs).
         skip_runners_and_metrics: If True skip loading runners, and do only a
             minimal load of metrics. This option is intended to enable loading of
@@ -65,6 +66,7 @@ def load_experiment(
             on a registry. Note that even though the intention is to skip loading
             of metrics, this option converts the loaded metrics into a base
             metric avoiding conversion related to custom properties of the metric.
+        load_auxiliary_experiments: whether to load auxiliary experiments.
     """
     config = SQAConfig() if config is None else config
     decoder = Decoder(config=config)
@@ -74,6 +76,7 @@ def load_experiment(
         reduced_state=reduced_state,
         load_trials_in_batches_of_size=load_trials_in_batches_of_size,
         skip_runners_and_metrics=skip_runners_and_metrics,
+        load_auxiliary_experiments=load_auxiliary_experiments,
     )
 
 
@@ -81,9 +84,9 @@ def _load_experiment(
     experiment_name: str,
     decoder: Decoder,
     reduced_state: bool = False,
-    load_trials_in_batches_of_size: Optional[int] = None,
-    ax_object_field_overrides: Optional[dict[str, Any]] = None,
+    load_trials_in_batches_of_size: int | None = None,
     skip_runners_and_metrics: bool = False,
+    load_auxiliary_experiments: bool = True,
 ) -> Experiment:
     """Load experiment by name, using given Decoder instance.
 
@@ -96,11 +99,7 @@ def _load_experiment(
         reduced_state: Whether to load experiment and generation strategy
         load_trials_in_batches_of_size: Number of trials to be fetched from database
             per batch
-        ax_object_field_overrides: Mapping of object types to mapping of fields
-            to override values loaded objects will all be instantiated with fields
-            set to override value
-            current valid object types are: "runner"
-
+        load_auxiliary_experiments: whether to load auxiliary experiments.
     """
 
     # pyre-ignore Incompatible variable type [9]: exp_sqa_class is declared to have type
@@ -166,7 +165,7 @@ def _load_experiment(
     return decoder.experiment_from_sqa(
         experiment_sqa=experiment_sqa,
         reduced_state=reduced_state,
-        ax_object_field_overrides=ax_object_field_overrides,
+        load_auxiliary_experiments=load_auxiliary_experiments,
     )
 
 
@@ -175,14 +174,15 @@ def _get_experiment_sqa(
     exp_sqa_class: type[SQAExperiment],
     trial_sqa_class: type[SQATrial],
     # pyre-fixme[2]: Parameter annotation cannot contain `Any`.
-    trials_query_options: Optional[list[Any]] = None,
-    load_trials_in_batches_of_size: Optional[int] = None,
+    trials_query_options: list[Any] | None = None,
+    load_trials_in_batches_of_size: int | None = None,
     skip_runners_and_metrics: bool = False,
 ) -> SQAExperiment:
     """Obtains SQLAlchemy experiment object from DB."""
     with session_scope() as session:
         query = (
-            session.query(exp_sqa_class).filter_by(name=experiment_name)
+            session.query(exp_sqa_class)
+            .filter_by(name=experiment_name)
             # Delay loading trials to a separate call to `_get_trials_sqa` below
             .options(noload("trials"))
         )
@@ -211,9 +211,9 @@ def _get_experiment_sqa(
 def _get_trials_sqa(
     experiment_id: int,
     trial_sqa_class: type[SQATrial],
-    load_trials_in_batches_of_size: Optional[int] = None,
+    load_trials_in_batches_of_size: int | None = None,
     # pyre-fixme[2]: Parameter annotation cannot contain `Any`.
-    trials_query_options: Optional[list[Any]] = None,
+    trials_query_options: list[Any] | None = None,
     skip_runners_and_metrics: bool = False,
 ) -> list[SQATrial]:
     """Obtains SQLAlchemy trial objects for given experiment ID from DB,
@@ -271,7 +271,7 @@ def _get_experiment_sqa_reduced_state(
     experiment_name: str,
     exp_sqa_class: type[SQAExperiment],
     trial_sqa_class: type[SQATrial],
-    load_trials_in_batches_of_size: Optional[int] = None,
+    load_trials_in_batches_of_size: int | None = None,
     skip_runners_and_metrics: bool = False,
 ) -> SQAExperiment:
     """Obtains most of the SQLAlchemy experiment object from DB, with some attributes
@@ -296,7 +296,7 @@ def _get_experiment_sqa_immutable_opt_config_and_search_space(
     experiment_name: str,
     exp_sqa_class: type[SQAExperiment],
     trial_sqa_class: type[SQATrial],
-    load_trials_in_batches_of_size: Optional[int] = None,
+    load_trials_in_batches_of_size: int | None = None,
     skip_runners_and_metrics: bool = False,
 ) -> SQAExperiment:
     """For experiments where the search space and opt config are
@@ -336,7 +336,7 @@ def _get_experiment_immutable_opt_config_and_search_space(
     )
 
 
-def _get_experiment_id(experiment_name: str, config: SQAConfig) -> Optional[int]:
+def _get_experiment_id(experiment_name: str, config: SQAConfig) -> int | None:
     """Get DB ID of the experiment by the given name if its in DB,
     return None otherwise.
     """
@@ -358,8 +358,8 @@ def _get_experiment_id(experiment_name: str, config: SQAConfig) -> Optional[int]
 
 def load_generation_strategy_by_experiment_name(
     experiment_name: str,
-    config: Optional[SQAConfig] = None,
-    experiment: Optional[Experiment] = None,
+    config: SQAConfig | None = None,
+    experiment: Experiment | None = None,
     reduced_state: bool = False,
     skip_runners_and_metrics: bool = False,
 ) -> GenerationStrategy:
@@ -379,8 +379,8 @@ def load_generation_strategy_by_experiment_name(
 
 def load_generation_strategy_by_id(
     gs_id: int,
-    config: Optional[SQAConfig] = None,
-    experiment: Optional[Experiment] = None,
+    config: SQAConfig | None = None,
+    experiment: Experiment | None = None,
     reduced_state: bool = False,
 ) -> GenerationStrategy:
     """Finds a generation strategy stored by a given ID and restores it."""
@@ -394,7 +394,7 @@ def load_generation_strategy_by_id(
 def _load_generation_strategy_by_experiment_name(
     experiment_name: str,
     decoder: Decoder,
-    experiment: Optional[Experiment] = None,
+    experiment: Experiment | None = None,
     reduced_state: bool = False,
     skip_runners_and_metrics: bool = False,
 ) -> GenerationStrategy:
@@ -425,7 +425,7 @@ def _load_generation_strategy_by_experiment_name(
 def _load_generation_strategy_by_id(
     gs_id: int,
     decoder: Decoder,
-    experiment: Optional[Experiment] = None,
+    experiment: Experiment | None = None,
     reduced_state: bool = False,
 ) -> GenerationStrategy:
     """Finds a generation strategy stored by a given ID and restores it."""
@@ -465,7 +465,7 @@ def _load_generation_strategy_by_id(
     )
 
 
-def get_generation_strategy_id(experiment_name: str, decoder: Decoder) -> Optional[int]:
+def get_generation_strategy_id(experiment_name: str, decoder: Decoder) -> int | None:
     """Get DB ID of the generation strategy, associated with the experiment
     with the given name if its in DB, return None otherwise.
     """
@@ -489,7 +489,7 @@ def get_generation_strategy_sqa(
     gs_id: int,
     decoder: Decoder,
     # pyre-fixme[2]: Parameter annotation cannot contain `Any`.
-    query_options: Optional[list[Any]] = None,
+    query_options: list[Any] | None = None,
 ) -> SQAGenerationStrategy:
     """Obtains the SQLAlchemy generation strategy object from DB."""
     gs_sqa_class = cast(
@@ -546,7 +546,7 @@ def get_generation_strategy_sqa_reduced_state(
 
         # Swap last generator run with no state for a generator run with
         # state.
-        gs_sqa.generator_runs[len(gs_sqa.generator_runs) - 1] = not_none(last_gr_sqa)
+        gs_sqa.generator_runs[len(gs_sqa.generator_runs) - 1] = none_throws(last_gr_sqa)
 
     return gs_sqa
 
@@ -566,7 +566,10 @@ def get_generator_runs_by_id(
         sqa_grs = query.all()
     return [
         decoder.generator_run_from_sqa(
-            generator_run_sqa=checked_cast(SQAGeneratorRun, sqa_gr),
+            generator_run_sqa=assert_is_instance(
+                sqa_gr,
+                SQAGeneratorRun,
+            ),
             reduced_state=reduced_state,
             immutable_search_space_and_opt_config=immutable_search_space_and_opt_config,
         )
@@ -591,7 +594,7 @@ def _get_generation_strategy_sqa_immutable_opt_config_and_search_space(
 
 def load_analysis_cards_by_experiment_name(
     experiment_name: str,
-    config: Optional[SQAConfig] = None,
+    config: SQAConfig | None = None,
 ) -> list[AnalysisCard]:
     """Loads analysis cards for an experiment."""
     config = SQAConfig() if config is None else config

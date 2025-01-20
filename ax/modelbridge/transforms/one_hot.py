@@ -20,7 +20,7 @@ from ax.modelbridge.transforms.rounding import (
 )
 from ax.modelbridge.transforms.utils import construct_new_search_space
 from ax.models.types import TConfig
-from ax.utils.common.typeutils import checked_cast
+from pyre_extensions import assert_is_instance
 
 if TYPE_CHECKING:
     # import as module to make sphinx-autodoc-typehints happy
@@ -87,10 +87,10 @@ class OneHot(Transform):
 
     def __init__(
         self,
-        search_space: Optional[SearchSpace] = None,
-        observations: Optional[list[Observation]] = None,
+        search_space: SearchSpace | None = None,
+        observations: list[Observation] | None = None,
         modelbridge: Optional["modelbridge_module.base.ModelBridge"] = None,
-        config: Optional[TConfig] = None,
+        config: TConfig | None = None,
     ) -> None:
         assert search_space is not None, "OneHot requires search space"
         # Identify parameters that should be transformed
@@ -111,8 +111,7 @@ class OneHot(Transform):
                     self.encoded_parameters[p.name] = [p.name + OH_PARAM_INFIX]
                 else:
                     self.encoded_parameters[p.name] = [
-                        "{}{}_{}".format(p.name, OH_PARAM_INFIX, i)
-                        for i in range(encoded_len)
+                        f"{p.name}{OH_PARAM_INFIX}_{i}" for i in range(encoded_len)
                     ]
 
     def transform_observation_features(
@@ -133,7 +132,7 @@ class OneHot(Transform):
         transformed_parameters: dict[str, Parameter] = {}
         for p_name, p in search_space.parameters.items():
             if p_name in self.encoded_parameters:
-                p = checked_cast(ChoiceParameter, p)
+                p = assert_is_instance(p, ChoiceParameter)
                 if p.is_fidelity:
                     raise ValueError(
                         f"Cannot one-hot-encode fidelity parameter {p_name}"

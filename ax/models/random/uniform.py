@@ -6,9 +6,9 @@
 
 # pyre-strict
 
-from typing import Optional
 
 import numpy as np
+import numpy.typing as npt
 from ax.models.random.base import RandomModel
 
 
@@ -24,9 +24,9 @@ class UniformGenerator(RandomModel):
     def __init__(
         self,
         deduplicate: bool = True,
-        seed: Optional[int] = None,
+        seed: int | None = None,
         init_position: int = 0,
-        generated_points: Optional[np.ndarray] = None,
+        generated_points: npt.NDArray | None = None,
         fallback_to_sample_polytope: bool = False,
     ) -> None:
         super().__init__(
@@ -41,7 +41,7 @@ class UniformGenerator(RandomModel):
             # Fast-forward the random state by generating & discarding samples.
             self._rs.uniform(size=(self.init_position))
 
-    def _gen_samples(self, n: int, tunable_d: int) -> np.ndarray:
+    def _gen_samples(self, n: int, tunable_d: int) -> npt.NDArray:
         """Generate samples from the scipy uniform distribution.
 
         Args:

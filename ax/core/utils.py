@@ -8,9 +8,11 @@
 
 from collections.abc import Iterable
 from copy import deepcopy
-from typing import NamedTuple, Optional
+from datetime import datetime
+from typing import NamedTuple
 
 import numpy as np
+import numpy.typing as npt
 from ax.core.arm import Arm
 from ax.core.base_trial import BaseTrial, TrialStatus
 from ax.core.batch_trial import BatchTrial
@@ -22,7 +24,8 @@ from ax.core.observation import ObservationFeatures
 from ax.core.optimization_config import OptimizationConfig
 from ax.core.trial import Trial
 from ax.core.types import ComparisonOp
-from pyre_extensions import none_throws
+from ax.utils.common.constants import Keys
+from pyre_extensions import assert_is_instance, none_throws
 
 TArmTrial = tuple[str, int]
 
@@ -126,8 +129,9 @@ def _get_missing_arm_trial_pairs(data: Data, metric_name: str) -> set[TArmTrial]
 
 
 def best_feasible_objective(
-    optimization_config: OptimizationConfig, values: dict[str, np.ndarray]
-) -> np.ndarray:
+    optimization_config: OptimizationConfig,
+    values: dict[str, npt.NDArray],
+) -> npt.NDArray:
     """Compute the best feasible objective value found by each iteration.
 
     Args:
@@ -168,7 +172,7 @@ def _extract_generator_runs(trial: BaseTrial) -> list[GeneratorRun]:
 
 def get_model_trace_of_times(
     experiment: Experiment,
-) -> tuple[list[Optional[float]], list[Optional[float]]]:
+) -> tuple[list[float | None], list[float | None]]:
     """
     Get time spent fitting the model and generating candidates during each trial.
     Not cumulative.
@@ -191,8 +195,8 @@ def get_model_times(experiment: Experiment) -> tuple[float, float]:
     course of the experiment.
     """
     fit_times, gen_times = get_model_trace_of_times(experiment)
-    fit_time = sum((t for t in fit_times if t is not None))
-    gen_time = sum((t for t in gen_times if t is not None))
+    fit_time = sum(t for t in fit_times if t is not None)
+    gen_time = sum(t for t in gen_times if t is not None)
     return fit_time, gen_time
 
 
@@ -202,7 +206,7 @@ def get_model_times(experiment: Experiment) -> tuple[float, float]:
 def extract_pending_observations(
     experiment: Experiment,
     include_out_of_design_points: bool = False,
-) -> Optional[dict[str, list[ObservationFeatures]]]:
+) -> dict[str, list[ObservationFeatures]] | None:
     """Computes a list of pending observation features (corresponding to:
     - arms that have been generated and run in the course of the experiment,
     but have not been completed with data,
@@ -240,7 +244,7 @@ def get_pending_observation_features(
     experiment: Experiment,
     *,
     include_out_of_design_points: bool = False,
-) -> Optional[dict[str, list[ObservationFeatures]]]:
+) -> dict[str, list[ObservationFeatures]] | None:
     """Computes a list of pending observation features (corresponding to:
     - arms that have been generated in the course of the experiment,
     but have not been completed with data,
@@ -274,7 +278,7 @@ def get_pending_observation_features(
         arm: Arm,
         trial_index: int,
         trial: BaseTrial,
-    ) -> Optional[ObservationFeatures]:
+    ) -> ObservationFeatures | None:
         if not include_out_of_design_points and not _is_in_design(arm=arm):
             return None
         return ObservationFeatures.from_arm(
@@ -331,7 +335,7 @@ def get_pending_observation_features(
 def get_pending_observation_features_based_on_trial_status(
     experiment: Experiment,
     include_out_of_design_points: bool = False,
-) -> Optional[dict[str, list[ObservationFeatures]]]:
+) -> dict[str, list[ObservationFeatures]] | None:
     """A faster analogue of ``get_pending_observation_features`` that makes
     assumptions about trials in experiment in order to speed up extraction
     of pending points.
@@ -393,14 +397,169 @@ def get_pending_observation_features_based_on_trial_status(
 def extend_pending_observations(
     experiment: Experiment,
     pending_observations: dict[str, list[ObservationFeatures]],
-    generator_run: GeneratorRun,
-) -> None:
+    generator_runs: list[GeneratorRun],
+) -> dict[str, list[ObservationFeatures]]:
     """Extend given pending observations dict (from metric name to observations
     that are pending for that metric), with arms in a given generator run.
+
+    Args:
+        experiment: Experiment, for which the generation strategy is producing
+            ``GeneratorRun``s.
+        pending_observations: Dict from metric name to pending observations for
+            that metric, used to avoid resuggesting arms that will be explored soon.
+        generator_runs: List of ``GeneratorRun``s currently produced by the
+            ``GenerationStrategy``.
+
+    Returns:
+        A new dictionary of pending observations to avoid in-place modification
     """
+    pending_observations = deepcopy(pending_observations)
+    extended_observations: dict[str, list[ObservationFeatures]] = {}
     for m in experiment.metrics:
-        if m not in pending_observations:
-            pending_observations[m] = []
-        pending_observations[m].extend(
-            ObservationFeatures.from_arm(a) for a in generator_run.arms
-        )
+        extended_obs_set = set(pending_observations.get(m, []))
+        for generator_run in generator_runs:
+            for a in generator_run.arms:
+                ob_ft = ObservationFeatures.from_arm(a)
+                extended_obs_set.add(ob_ft)
+        extended_observations[m] = list(extended_obs_set)
+    return extended_observations
+
+
+# -------------------- Get target trial utils. ---------------------
+
+
+def get_target_trial_index(experiment: Experiment) -> int | None:
+    """Get the index of the target trial in the ``Experiment``.
+
+    Find the target trial giving priority in the following order:
+        1. a running long-run trial
+        2. Most recent trial expecting data with running trials be considered the most
+            recent
+
+    In the event of any ties, the tie breaking order is:
+        a. longest running trial by duration
+        b. trial with most arms
+        c. arbitraty selection
+
+    Args:
+        experiment: The experiment associated with this ``GenerationStrategy``.
+
+    Returns:
+        The index of the target trial in the ``Experiment``.
+    """
+    # TODO: @mgarrard improve logic to include trial_obsolete_threshold that
+    # takes into account the age of the trial, and consider more heavily weighting
+    # long run trials.
+    running_trials = [
+        assert_is_instance(trial, BatchTrial)
+        for trial in experiment.trials_by_status[TrialStatus.RUNNING]
+    ]
+    sorted_running_trials = _sort_trials(trials=running_trials, trials_are_running=True)
+    # Priority 1: Any running long-run trial
+    target_trial_idx = next(
+        (
+            trial.index
+            for trial in sorted_running_trials
+            if trial.trial_type == Keys.LONG_RUN
+        ),
+        None,
+    )
+    if target_trial_idx is not None:
+        return target_trial_idx
+
+    # Priority 2: longest running currently running trial
+    if len(sorted_running_trials) > 0:
+        return sorted_running_trials[0].index
+
+    # Priortiy 3: the longest running trial expecting data, discounting running trials
+    # as we handled those above
+    trials_expecting_data = [
+        assert_is_instance(trial, BatchTrial)
+        for trial in experiment.trials_expecting_data
+        if trial.status != TrialStatus.RUNNING
+    ]
+    sorted_trials_expecting_data = _sort_trials(
+        trials=trials_expecting_data, trials_are_running=False
+    )
+    if len(sorted_trials_expecting_data) > 0:
+        return sorted_trials_expecting_data[0].index
+
+    return None
+
+
+def _sort_trials(
+    trials: list[BatchTrial],
+    trials_are_running: bool,
+) -> list[BatchTrial]:
+    """Sort a list of trials by (1) duration of trial, (2) number of arms in trial.
+
+    Args:
+        trials: The trials to sort.
+        trials_are_running: Whether the trials are running or not, used to determine
+            the trial duration for sorting
+
+    Returns:
+        The sorted trials.
+    """
+    default_time_run_started = datetime.now()
+    twelve_hours_in_secs = 12 * 60 * 60
+    sorted_trials_expecting_data = sorted(
+        trials,
+        key=lambda t: (
+            # First sorting criterion: trial duration, if a trial's duration is within
+            # 12 hours of another trial, we consider them to be a tie
+            int(
+                (
+                    # if the trial is running, we set end time to now for sorting ease
+                    (
+                        _time_trial_completed_safe(trial=t).timestamp()
+                        if not trials_are_running
+                        else default_time_run_started.timestamp()
+                    )
+                    - _time_trial_started_safe(
+                        trial=t, default_time_run_started=default_time_run_started
+                    ).timestamp()
+                )
+                // twelve_hours_in_secs
+            ),
+            # In event of a tie, we want the trial with the most arms
+            +len(t.arms_by_name),
+        ),
+        reverse=True,
+    )
+    return sorted_trials_expecting_data
+
+
+def _time_trial_started_safe(
+    trial: BatchTrial, default_time_run_started: datetime
+) -> datetime:
+    """Not all RUNNING trials have ``time_run_started`` defined.
+    This function accepts, but penalizes those trials by using a
+    default ``time_run_started``, which moves them to the end of
+    the sort because they would be running a very short time.
+
+    Args:
+        trial: The trial to check.
+        default_time_run_started: The time to use if `time_run_started` is not defined.
+            Do not use ``default_time_run_started=datetime.now()`` as it will be
+            slightly different for each trial.  Instead set ``val = datetime.now()``
+            and then pass ``val`` as the ``default_time_run_started`` argument.
+    """
+    return (
+        trial.time_run_started
+        if trial.time_run_started is not None
+        else default_time_run_started
+    )
+
+
+def _time_trial_completed_safe(trial: BatchTrial) -> datetime:
+    """Not all COMPLETED trials have `time_completed` defined.
+    This functions accepts, but penalizes those trials by
+    choosing epoch 0 as the completed time,
+    which moves them to the end of the sort because
+    they would be running a very short time."""
+    return (
+        trial.time_completed
+        if trial.time_completed is not None
+        else datetime.fromtimestamp(0)
+    )

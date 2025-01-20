@@ -9,11 +9,13 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 
 from math import sqrt
-from typing import Callable, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import numpy as np
+import numpy.typing as npt
 from ax.core.observation import Observation, ObservationData, ObservationFeatures
 from ax.core.optimization_config import (
     MultiObjectiveOptimizationConfig,
@@ -24,8 +26,8 @@ from ax.core.search_space import SearchSpace
 from ax.modelbridge import ModelBridge
 from ax.modelbridge.transforms.base import Transform
 from ax.models.types import TConfig
-from ax.utils.common.typeutils import not_none
 from ax.utils.stats.statstools import relativize, unrelativize
+from pyre_extensions import none_throws
 
 if TYPE_CHECKING:
     # import as module to make sphinx-autodoc-typehints happy
@@ -47,16 +49,15 @@ class BaseRelativize(Transform, ABC):
     appropriate transform/untransform differently.
     """
 
-    MISSING_STATUS_QUO_ERROR = "Cannot relativize data without status quo data"
-
     def __init__(
         self,
-        search_space: Optional[SearchSpace] = None,
-        observations: Optional[list[Observation]] = None,
-        modelbridge: Optional[modelbridge_module.base.ModelBridge] = None,
-        config: Optional[TConfig] = None,
+        search_space: SearchSpace | None = None,
+        observations: list[Observation] | None = None,
+        modelbridge: modelbridge_module.base.ModelBridge | None = None,
+        config: TConfig | None = None,
     ) -> None:
-        assert observations is not None, "Relativize requires observations"
+        cls_name = self.__class__.__name__
+        assert observations is not None, f"{cls_name} requires observations"
         super().__init__(
             search_space=search_space,
             observations=observations,
@@ -64,9 +65,18 @@ class BaseRelativize(Transform, ABC):
             config=config,
         )
         # self.modelbridge should NOT be modified
-        self.modelbridge: ModelBridge = not_none(
-            modelbridge, "Relativize transform requires a modelbridge"
+        self.modelbridge: ModelBridge = none_throws(
+            modelbridge, f"{cls_name} transform requires a modelbridge"
         )
+
+        self.status_quo_data_by_trial: dict[int, ObservationData] = none_throws(
+            self.modelbridge.status_quo_data_by_trial,
+            f"{cls_name} requires status quo data.",
+        )
+        # use latest index of latest observed trial by default
+        # to handle pending trials, which may not have a trial_index
+        # if TrialAsTask was not used to generate the trial.
+        self.default_trial_idx: int = max(self.status_quo_data_by_trial.keys())
 
     @property
     @abstractmethod
@@ -76,8 +86,8 @@ class BaseRelativize(Transform, ABC):
     def transform_optimization_config(
         self,
         optimization_config: OptimizationConfig,
-        modelbridge: Optional[modelbridge_module.base.ModelBridge] = None,
-        fixed_features: Optional[ObservationFeatures] = None,
+        modelbridge: modelbridge_module.base.ModelBridge | None = None,
+        fixed_features: ObservationFeatures | None = None,
     ) -> OptimizationConfig:
         r"""
         Change the relative flag of the given relative optimization configuration
@@ -136,7 +146,7 @@ class BaseRelativize(Transform, ABC):
     def untransform_outcome_constraints(
         self,
         outcome_constraints: list[OutcomeConstraint],
-        fixed_features: Optional[ObservationFeatures] = None,
+        fixed_features: ObservationFeatures | None = None,
     ) -> list[OutcomeConstraint]:
         for c in outcome_constraints:
             c.relative = True
@@ -158,42 +168,36 @@ class BaseRelativize(Transform, ABC):
             observations=observations, rel_op=unrelativize
         )
 
+    def _get_relative_data_from_obs(
+        self,
+        obs: Observation,
+        rel_op: Callable[..., tuple[npt.NDArray, npt.NDArray]],
+    ) -> ObservationData:
+        idx = (
+            int(obs.features.trial_index)
+            if obs.features.trial_index is not None
+            else self.default_trial_idx
+        )
+        if idx not in self.status_quo_data_by_trial:
+            raise ValueError(
+                f"{self.__class__.__name__} requires status quo data for trial "
+                f"index {idx}."
+            )
+        return self._get_relative_data(
+            data=obs.data,
+            status_quo_data=self.status_quo_data_by_trial[idx],
+            rel_op=rel_op,
+        )
+
     def _rel_op_on_observations(
         self,
         observations: list[Observation],
-        rel_op: Callable[..., tuple[np.ndarray, np.ndarray]],
+        rel_op: Callable[..., tuple[npt.NDArray, npt.NDArray]],
     ) -> list[Observation]:
-
-        sq_data_by_trial: dict[int, ObservationData] = not_none(
-            self.modelbridge.status_quo_data_by_trial, self.MISSING_STATUS_QUO_ERROR
-        )
-
-        # use latest index of latest observed trial by default
-        # to handle pending trials, which may not have a trial_index
-        # if TrialAsTask was not used to generate the trial.
-        default_trial_idx: int = max(sq_data_by_trial.keys())
-
-        def _get_relative_data_from_obs(
-            obs: Observation,
-            rel_op: Callable[..., tuple[np.ndarray, np.ndarray]],
-        ) -> ObservationData:
-            idx = (
-                int(obs.features.trial_index)
-                if obs.features.trial_index is not None
-                else default_trial_idx
-            )
-            if idx not in sq_data_by_trial:
-                raise ValueError(self.MISSING_STATUS_QUO_ERROR)
-            return self._get_relative_data(
-                data=obs.data,
-                status_quo_data=sq_data_by_trial[idx],
-                rel_op=rel_op,
-            )
-
         return [
             Observation(
                 features=obs.features,
-                data=_get_relative_data_from_obs(obs, rel_op),
+                data=self._get_relative_data_from_obs(obs, rel_op),
                 arm_name=obs.arm_name,
             )
             for obs in observations
@@ -203,7 +207,7 @@ class BaseRelativize(Transform, ABC):
         self,
         data: ObservationData,
         status_quo_data: ObservationData,
-        rel_op: Callable[..., tuple[np.ndarray, np.ndarray]],
+        rel_op: Callable[..., tuple[npt.NDArray, npt.NDArray]],
     ) -> ObservationData:
         r"""
         Relativize or unrelativize `data` based on `status_quo_data` based on `rel_op`
@@ -225,36 +229,58 @@ class BaseRelativize(Transform, ABC):
             covariance=np.zeros((L, L)),
         )
         for i, metric in enumerate(data.metric_names):
-            try:
-                j = next(
-                    k for k in range(L) if status_quo_data.metric_names[k] == metric
-                )
-            except (IndexError, StopIteration):
-                raise ValueError(
-                    "Relativization cannot be performed because "
-                    "ObservationData for status quo is missing metrics"
-                )
-
+            j = get_metric_index(data=status_quo_data, metric_name=metric)
             means_t = data.means[i]
             sems_t = sqrt(data.covariance[i][i])
             mean_c = status_quo_data.means[j]
             sem_c = sqrt(status_quo_data.covariance[j][j])
 
-            # if the is the status quo
-            if means_t == mean_c and sems_t == sem_c:
-                means_rel, sems_rel = 0, 0
-            else:
-                means_rel, sems_rel = rel_op(
-                    means_t=means_t,
-                    sems_t=sems_t,
-                    mean_c=mean_c,
-                    sem_c=sem_c,
-                    as_percent=True,
-                    control_as_constant=self.control_as_constant,
-                )
+            means_rel, sems_rel = self._get_rel_mean_sem(
+                means_t=means_t,
+                sems_t=sems_t,
+                mean_c=mean_c,
+                sem_c=sem_c,
+                metric=metric,
+                rel_op=rel_op,
+            )
             result.means[i] = means_rel
             result.covariance[i][i] = sems_rel**2
         return result
+
+    def _get_rel_mean_sem(
+        self,
+        means_t: float,
+        sems_t: float,
+        mean_c: float,
+        sem_c: float,
+        metric: str,
+        rel_op: Callable[..., tuple[npt.NDArray, npt.NDArray]],
+    ) -> tuple[float | npt.NDArray, float | npt.NDArray]:
+        """Compute (un)relativized mean and sem for a single metric."""
+        # if the is the status quo
+        if means_t == mean_c and sems_t == sem_c:
+            return 0, 0
+        return rel_op(
+            means_t=means_t,
+            sems_t=sems_t,
+            mean_c=mean_c,
+            sem_c=sem_c,
+            as_percent=True,
+            control_as_constant=self.control_as_constant,
+        )
+
+
+def get_metric_index(data: ObservationData, metric_name: str) -> int:
+    """Get the index of a metric in the ObservationData."""
+    try:
+        return next(
+            k for k, name in enumerate(data.metric_names) if name == metric_name
+        )
+    except (IndexError, StopIteration):
+        raise ValueError(
+            "Relativization cannot be performed because "
+            "ObservationData for status quo is missing metrics"
+        )
 
 
 class Relativize(BaseRelativize):

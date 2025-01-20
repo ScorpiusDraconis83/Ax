@@ -7,7 +7,7 @@
 # pyre-strict
 
 from logging import Logger
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 from ax.core.base_trial import TrialStatus
@@ -16,6 +16,7 @@ from ax.core.observation import Observation, ObservationData, ObservationFeature
 from ax.core.optimization_config import OptimizationConfig
 from ax.core.parameter import FixedParameter, RangeParameter
 from ax.core.search_space import SearchSpace
+from ax.exceptions.core import UserInputError
 from ax.modelbridge.base import ModelBridge
 from ax.modelbridge.best_model_selector import (
     ReductionCriterion,
@@ -25,19 +26,26 @@ from ax.modelbridge.cross_validation import FISHER_EXACT_TEST_P
 from ax.modelbridge.dispatch_utils import choose_generation_strategy
 from ax.modelbridge.factory import get_sobol
 from ax.modelbridge.generation_node import GenerationNode
+
+from ax.modelbridge.generation_node_input_constructors import (
+    InputConstructorPurpose,
+    NodeInputConstructors,
+)
 from ax.modelbridge.generation_strategy import GenerationStep, GenerationStrategy
 from ax.modelbridge.model_spec import ModelSpec
 from ax.modelbridge.registry import Models
 from ax.modelbridge.transforms.base import Transform
 from ax.modelbridge.transforms.int_to_float import IntToFloat
+from ax.modelbridge.transforms.transform_to_new_sq import TransformToNewSQ
 from ax.modelbridge.transition_criterion import (
     AutoTransitionAfterGen,
+    IsSingleObjective,
     MaxGenerationParallelism,
-    MaxTrials,
     MinimumPreferenceOccurances,
     MinTrials,
 )
 from ax.models.torch.botorch_modular.surrogate import Surrogate
+from ax.utils.common.constants import Keys
 from ax.utils.common.logger import get_logger
 from ax.utils.testing.core_stubs import (
     get_experiment,
@@ -189,9 +197,9 @@ def get_generation_strategy(
         if with_callable_model_kwarg:
             # pyre-ignore[16]: testing hack to test serialization of callable kwargs
             # in generation steps.
-            gs._nodes[0]._model_spec_to_gen_from.model_kwargs[
-                "model_constructor"
-            ] = get_sobol
+            gs._nodes[0]._model_spec_to_gen_from.model_kwargs["model_constructor"] = (
+                get_sobol
+            )
     else:
         gs = choose_generation_strategy(
             search_space=get_search_space(), should_deduplicate=True
@@ -214,6 +222,15 @@ def get_generation_strategy(
 def sobol_gpei_generation_node_gs(
     with_model_selection: bool = False,
     with_auto_transition: bool = False,
+    with_previous_node: bool = False,
+    with_input_constructors_all_n: bool = False,
+    with_input_constructors_remaining_n: bool = False,
+    with_input_constructors_repeat_n: bool = False,
+    with_input_constructors_target_trial: bool = False,
+    with_input_constructors_sq_features: bool = False,
+    with_unlimited_gen_mbm: bool = False,
+    with_trial_type: bool = False,
+    with_is_SOO_transition: bool = False,
 ) -> GenerationStrategy:
     """Returns a basic SOBOL+MBM GS using GenerationNodes for testing.
 
@@ -221,8 +238,29 @@ def sobol_gpei_generation_node_gs(
         with_model_selection: If True, will add a second ModelSpec in the MBM node.
             This can be used for testing model selection.
     """
+    if sum([with_auto_transition, with_unlimited_gen_mbm, with_is_SOO_transition]) > 1:
+        raise UserInputError(
+            "Only one of with_auto_transition, with_unlimited_gen_mbm, "
+            "with_is_SOO_transition can be set to True."
+        )
+    if (
+        sum(
+            [
+                with_input_constructors_all_n,
+                with_input_constructors_remaining_n,
+                with_input_constructors_repeat_n,
+                with_input_constructors_target_trial,
+                with_input_constructors_sq_features,
+            ]
+        )
+        > 1
+    ):
+        raise UserInputError(
+            "Only one of the input_constructors kwargs can be set to True."
+        )
+
     sobol_criterion = [
-        MaxTrials(
+        MinTrials(
             threshold=5,
             transition_to="MBM_node",
             block_gen_if_met=True,
@@ -233,7 +271,7 @@ def sobol_gpei_generation_node_gs(
     # self-transitioning for mbm criterion isn't representative of real-world, but is
     # useful for testing attributes likes repr etc
     mbm_criterion = [
-        MaxTrials(
+        MinTrials(
             threshold=2,
             transition_to="MBM_node",
             block_gen_if_met=True,
@@ -257,7 +295,8 @@ def sobol_gpei_generation_node_gs(
             not_in_statuses=None,
         ),
     ]
-    alt_mbm_criterion = [AutoTransitionAfterGen(transition_to="MBM_node")]
+    auto_mbm_criterion = [AutoTransitionAfterGen(transition_to="MBM_node")]
+    is_SOO_mbm_criterion = [IsSingleObjective(transition_to="MBM_node")]
     step_model_kwargs = {"silently_filter_kwargs": True}
     sobol_model_spec = ModelSpec(
         model_enum=Models.SOBOL,
@@ -290,10 +329,25 @@ def sobol_gpei_generation_node_gs(
     if with_auto_transition:
         mbm_node = GenerationNode(
             node_name="MBM_node",
-            transition_criteria=alt_mbm_criterion,
+            transition_criteria=auto_mbm_criterion,
             model_specs=mbm_model_specs,
             best_model_selector=best_model_selector,
         )
+    elif with_unlimited_gen_mbm:
+        # no TC defined is equivalent to unlimited gen
+        mbm_node = GenerationNode(
+            node_name="MBM_node",
+            model_specs=mbm_model_specs,
+            best_model_selector=best_model_selector,
+        )
+    elif with_is_SOO_transition:
+        mbm_node = GenerationNode(
+            node_name="MBM_node",
+            transition_criteria=is_SOO_mbm_criterion,
+            model_specs=mbm_model_specs,
+            best_model_selector=best_model_selector,
+        )
+
     else:
         mbm_node = GenerationNode(
             node_name="MBM_node",
@@ -302,12 +356,90 @@ def sobol_gpei_generation_node_gs(
             best_model_selector=best_model_selector,
         )
 
+    # in an actual GS, this would be set during transition, manually setting here for
+    # testing purposes
+    if with_previous_node:
+        mbm_node._previous_node_name = sobol_node.node_name
+
+    if with_trial_type:
+        sobol_node._trial_type = Keys.LONG_RUN
+        mbm_node._trial_type = Keys.SHORT_RUN
+    # test input constructors, this also leaves the mbm node with no input
+    # constructors which validates encoding/decoding of instances with no
+    # input constructors
+    if with_input_constructors_all_n:
+        sobol_node._input_constructors = {
+            InputConstructorPurpose.N: NodeInputConstructors.ALL_N,
+        }
+    elif with_input_constructors_remaining_n:
+        sobol_node._input_constructors = {
+            InputConstructorPurpose.N: NodeInputConstructors.REMAINING_N,
+        }
+    elif with_input_constructors_repeat_n:
+        sobol_node._input_constructors = {
+            InputConstructorPurpose.N: NodeInputConstructors.REPEAT_N,
+        }
+    elif with_input_constructors_target_trial:
+        purpose = InputConstructorPurpose.FIXED_FEATURES
+        sobol_node._input_constructors = {
+            purpose: NodeInputConstructors.TARGET_TRIAL_FIXED_FEATURES,
+        }
+    elif with_input_constructors_sq_features:
+        purpose = InputConstructorPurpose.STATUS_QUO_FEATURES
+        sobol_node._input_constructors = {
+            purpose: NodeInputConstructors.STATUS_QUO_FEATURES,
+        }
+
     sobol_mbm_GS_nodes = GenerationStrategy(
         name="Sobol+MBM_Nodes",
         nodes=[sobol_node, mbm_node],
         steps=None,
     )
     return sobol_mbm_GS_nodes
+
+
+def get_sobol_MBM_MTGP_gs() -> GenerationStrategy:
+    return GenerationStrategy(
+        nodes=[
+            GenerationNode(
+                node_name="Sobol",
+                model_specs=[ModelSpec(model_enum=Models.SOBOL)],
+                transition_criteria=[
+                    MinTrials(
+                        threshold=1,
+                        transition_to="MBM",
+                    )
+                ],
+            ),
+            GenerationNode(
+                node_name="MBM",
+                model_specs=[
+                    ModelSpec(
+                        model_enum=Models.BOTORCH_MODULAR,
+                    ),
+                ],
+                transition_criteria=[
+                    MinTrials(
+                        threshold=1,
+                        transition_to="MTGP",
+                        only_in_statuses=[
+                            TrialStatus.RUNNING,
+                            TrialStatus.COMPLETED,
+                            TrialStatus.EARLY_STOPPED,
+                        ],
+                    )
+                ],
+            ),
+            GenerationNode(
+                node_name="MTGP",
+                model_specs=[
+                    ModelSpec(
+                        model_enum=Models.ST_MTGP,
+                    ),
+                ],
+            ),
+        ],
+    )
 
 
 def get_transform_type() -> type[Transform]:
@@ -320,6 +452,10 @@ def get_input_transform_type() -> type[InputTransform]:
 
 def get_outcome_transfrom_type() -> type[OutcomeTransform]:
     return Standardize
+
+
+def get_to_new_sq_transform_type() -> type[TransformToNewSQ]:
+    return TransformToNewSQ
 
 
 def get_experiment_for_value() -> Experiment:
@@ -480,7 +616,7 @@ def get_surrogate_as_dict() -> dict[str, Any]:
 
 
 def get_surrogate_spec_as_dict(
-    model_class: Optional[str] = None, with_legacy_input_transform: bool = False
+    model_class: str | None = None, with_legacy_input_transform: bool = False
 ) -> dict[str, Any]:
     """
     For use ensuring backwards compatibility when loading SurrogateSpec
@@ -555,8 +691,8 @@ class transform_1(Transform):
     def transform_optimization_config(
         self,
         optimization_config: OptimizationConfig,
-        modelbridge: Optional[ModelBridge],
-        fixed_features: Optional[ObservationFeatures],
+        modelbridge: ModelBridge | None,
+        fixed_features: ObservationFeatures | None,
     ) -> OptimizationConfig:
         return (  # pyre-ignore[7]: pyre is right, this is a hack for testing.
             # pyre-fixme[58]: `+` is not supported for operand types
@@ -614,8 +750,8 @@ class transform_2(Transform):
     def transform_optimization_config(
         self,
         optimization_config: OptimizationConfig,
-        modelbridge: Optional[ModelBridge],
-        fixed_features: Optional[ObservationFeatures],
+        modelbridge: ModelBridge | None,
+        fixed_features: ObservationFeatures | None,
     ) -> OptimizationConfig:
         return (
             # pyre-fixme[58]: `**` is not supported for operand types
@@ -646,6 +782,9 @@ class transform_2(Transform):
     ) -> list[ObservationFeatures]:
         for obsf in observation_features:
             for pname in obsf.parameters:
+                # pyre-fixme[6]: For 1st argument expected `Union[bytes, complex,
+                #  float, int, generic, str]` but got `Union[None, bool, float, int,
+                #  str]`.
                 obsf.parameters[pname] = np.sqrt(obsf.parameters[pname])
         return observation_features
 

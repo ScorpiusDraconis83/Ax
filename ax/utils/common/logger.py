@@ -9,9 +9,9 @@
 import logging
 import os
 import re
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from functools import wraps
-from typing import Any, Callable, TypeVar
+from typing import Any, TypeVar
 
 from ax.utils.common.decorator import ClassDecorator
 
@@ -57,9 +57,7 @@ def get_logger(
         The logging.Logger object.
     """
     # because handlers are attached to the "ax" module
-    if not force_name and not re.search(
-        r"^{ax_root}(\.|$)".format(ax_root=AX_ROOT_LOGGER_NAME), name
-    ):
+    if not force_name and not re.search(rf"^{AX_ROOT_LOGGER_NAME}(\.|$)", name):
         name = f"{AX_ROOT_LOGGER_NAME}.{name}"
     logger = logging.getLogger(name)
     logger.setLevel(level)
@@ -150,6 +148,20 @@ def set_stderr_log_level(level: int) -> None:
     are printed to STDERR by the root logger
     """
     ROOT_STREAM_HANDLER.setLevel(level)
+
+
+def set_ax_logger_levels(level: int) -> None:
+    """Set the log level for all Ax loggers, such that logs of given level
+    are printed to STDERR by the root logger
+    """
+
+    for axLogger in logging.Logger.manager.loggerDict.values():
+        if isinstance(axLogger, logging.Logger) and axLogger.name.startswith(
+            AX_ROOT_LOGGER_NAME
+        ):
+            axLogger.setLevel(level)
+
+    set_stderr_log_level(level)
 
 
 class disable_logger(ClassDecorator):

@@ -7,7 +7,7 @@
 # pyre-strict
 
 from copy import deepcopy
-from typing import Any, cast, Optional
+from typing import Any, cast
 
 import numpy as np
 from ax.core import OptimizationConfig
@@ -28,7 +28,6 @@ from ax.early_stopping.strategies.logical import (
 from ax.early_stopping.utils import align_partial_results
 from ax.exceptions.core import UnsupportedError
 from ax.utils.common.testutils import TestCase
-from ax.utils.common.typeutils import checked_cast, not_none
 from ax.utils.testing.core_stubs import (
     get_branin_arms,
     get_branin_experiment,
@@ -36,7 +35,7 @@ from ax.utils.testing.core_stubs import (
     get_experiment_with_multi_objective,
     get_test_map_data_experiment,
 )
-from pyre_extensions import none_throws
+from pyre_extensions import assert_is_instance, none_throws
 
 
 class TestBaseEarlyStoppingStrategy(TestCase):
@@ -54,7 +53,7 @@ class TestBaseEarlyStoppingStrategy(TestCase):
                 trial_indices: set[int],
                 experiment: Experiment,
                 **kwargs: dict[str, Any],
-            ) -> dict[int, Optional[str]]:
+            ) -> dict[int, str | None]:
                 return {}
 
         test_experiment = get_test_map_data_experiment(
@@ -142,7 +141,7 @@ class TestBaseEarlyStoppingStrategy(TestCase):
                 trial_indices: set[int],
                 experiment: Experiment,
                 **kwargs: dict[str, Any],
-            ) -> dict[int, Optional[str]]:
+            ) -> dict[int, str | None]:
                 return {}
 
         experiment = get_test_map_data_experiment(
@@ -157,7 +156,7 @@ class TestBaseEarlyStoppingStrategy(TestCase):
             experiment,
             metric_names=[metric_name],
         )
-        map_data = checked_cast(MapData, map_data)
+        map_data = assert_is_instance(map_data, MapData)
         self.assertTrue(
             es_strategy.is_eligible(
                 trial_index=0,
@@ -208,6 +207,26 @@ class TestBaseEarlyStoppingStrategy(TestCase):
             )[0]
         )
 
+    def test_early_stopping_savings(self) -> None:
+        class FakeStrategy(BaseEarlyStoppingStrategy):
+            def should_stop_trials_early(
+                self,
+                trial_indices: set[int],
+                experiment: Experiment,
+                **kwargs: dict[str, Any],
+            ) -> dict[int, str | None]:
+                return {}
+
+        exp = get_branin_experiment_with_timestamp_map_metric()
+        es_strategy = FakeStrategy(min_progression=3, max_progression=5)
+
+        self.assertEqual(
+            es_strategy.estimate_early_stopping_savings(
+                experiment=exp,
+            ),
+            0,
+        )
+
 
 class TestModelBasedEarlyStoppingStrategy(TestCase):
     def test_get_training_data(self) -> None:
@@ -217,7 +236,7 @@ class TestModelBasedEarlyStoppingStrategy(TestCase):
                 trial_indices: set[int],
                 experiment: Experiment,
                 **kwargs: dict[str, Any],
-            ) -> dict[int, Optional[str]]:
+            ) -> dict[int, str | None]:
                 return {}
 
         experiment = get_test_map_data_experiment(
@@ -343,7 +362,7 @@ class TestPercentileEarlyStoppingStrategy(TestCase):
             # remove the optimization config to force that only the tracking metric can
             # be used for early stopping
             exp._optimization_config = None
-            data = checked_cast(MapData, exp.fetch_data())
+            data = assert_is_instance(exp.fetch_data(), MapData)
             self.assertTrue((data.map_df["metric_name"] == "tracking_branin_map").all())
         else:
             metric_names = None
@@ -419,7 +438,7 @@ class TestPercentileEarlyStoppingStrategy(TestCase):
         exp = get_test_map_data_experiment(num_trials=5, num_fetches=3, num_complete=5)
         # manually "unalign" timestamps to simulate real-world scenario
         # where each curve reports results at different steps
-        data = checked_cast(MapData, exp.fetch_data())
+        data = assert_is_instance(exp.fetch_data(), MapData)
 
         unaligned_timestamps = [0, 1, 4, 1, 2, 3, 1, 3, 4, 0, 1, 2, 0, 2, 4]
         data.map_df.loc[data.map_df["metric_name"] == "branin_map", "timestamp"] = (
@@ -460,7 +479,7 @@ class TestPercentileEarlyStoppingStrategy(TestCase):
 
         # manually "unalign" timestamps to simulate real-world scenario
         # where each curve reports results at different steps
-        data = checked_cast(MapData, exp.fetch_data())
+        data = assert_is_instance(exp.fetch_data(), MapData)
         data.map_df.sort_values(by=["metric_name", "arm_name"], inplace=True)
         data.map_df.reset_index(drop=True, inplace=True)
 
@@ -695,10 +714,10 @@ def _evaluate_early_stopping_with_df(
     early_stopping_strategy: PercentileEarlyStoppingStrategy,
     experiment: Experiment,
     metric_name: str,
-) -> dict[int, Optional[str]]:
+) -> dict[int, str | None]:
     """Helper function for testing PercentileEarlyStoppingStrategy
     on an arbitrary (MapData) df."""
-    data = not_none(
+    data = none_throws(
         early_stopping_strategy._check_validity_and_get_data(experiment, [metric_name])
     )
     metric_to_aligned_means, _ = align_partial_results(

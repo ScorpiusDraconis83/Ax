@@ -8,7 +8,6 @@
 
 from collections.abc import Iterable
 from logging import Logger
-from typing import Optional
 
 import pandas as pd
 from ax.core.experiment import Experiment
@@ -25,13 +24,12 @@ class ThresholdEarlyStoppingStrategy(BaseEarlyStoppingStrategy):
 
     def __init__(
         self,
-        metric_names: Optional[Iterable[str]] = None,
-        seconds_between_polls: int = 300,
+        metric_names: Iterable[str] | None = None,
         metric_threshold: float = 0.2,
-        min_progression: Optional[float] = 10,
-        max_progression: Optional[float] = None,
-        min_curves: Optional[int] = 5,
-        trial_indices_to_ignore: Optional[list[int]] = None,
+        min_progression: float | None = 10,
+        max_progression: float | None = None,
+        min_curves: int | None = 5,
+        trial_indices_to_ignore: list[int] | None = None,
         normalize_progressions: bool = False,
     ) -> None:
         """Construct a ThresholdEarlyStoppingStrategy instance.
@@ -40,12 +38,10 @@ class ThresholdEarlyStoppingStrategy(BaseEarlyStoppingStrategy):
             metric_names: A (length-one) list of name of the metric to observe. If
                 None will default to the objective metric on the Experiment's
                 OptimizationConfig.
-            seconds_between_polls: How often to poll the early stopping metric to
-                evaluate whether or not the trial should be early stopped.
             metric_threshold: The metric threshold that a trial needs to reach by
                 min_progression in order not to be stopped.
             min_progression: Only stop trials if the latest progression value
-                (e.g. timestamp, epochs, training data used) is greater than this
+                (e.g. timestamp, epochs, training data used) is worse than this
                 threshold. Prevents stopping prematurely before enough data is gathered
                 to make a decision.
             max_progression: Do not stop trials that have passed `max_progression`.
@@ -54,7 +50,7 @@ class ThresholdEarlyStoppingStrategy(BaseEarlyStoppingStrategy):
                 `min_curves` have completed with curve data attached. That is, if
                 `min_curves` trials are completed but their curve data was not
                 successfully retrieved, further trials may not be early-stopped.
-            trial_indices_to_ignore: Trial indices that should not be early stopped.
+            trial_indices_to_ignore: Trial indices that should not be early-stopped.
             normalize_progressions: Normalizes the progression column of the MapData df
                 by dividing by the max. If the values were originally in [0, `prog_max`]
                 (as we would expect), the transformed values will be in [0, 1]. Useful
@@ -65,7 +61,6 @@ class ThresholdEarlyStoppingStrategy(BaseEarlyStoppingStrategy):
         """
         super().__init__(
             metric_names=metric_names,
-            seconds_between_polls=seconds_between_polls,
             min_progression=min_progression,
             max_progression=max_progression,
             min_curves=min_curves,
@@ -85,7 +80,7 @@ class ThresholdEarlyStoppingStrategy(BaseEarlyStoppingStrategy):
         self,
         trial_indices: set[int],
         experiment: Experiment,
-    ) -> dict[int, Optional[str]]:
+    ) -> dict[int, str | None]:
         """Stop a trial if its performance doesn't reach a pre-specified threshold
         by `min_progression`.
 
@@ -142,7 +137,7 @@ class ThresholdEarlyStoppingStrategy(BaseEarlyStoppingStrategy):
         df: pd.DataFrame,
         map_key: str,
         minimize: bool,
-    ) -> tuple[bool, Optional[str]]:
+    ) -> tuple[bool, str | None]:
         """Stop a trial if its performance doesn't reach a pre-specified threshold
         by `min_progression`.
 

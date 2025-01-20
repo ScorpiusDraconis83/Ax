@@ -15,7 +15,7 @@ from ax.core.search_space import RobustSearchSpace, SearchSpace
 from ax.exceptions.core import UnsupportedError
 from ax.modelbridge.transforms.base import Transform
 from ax.models.types import TConfig
-from ax.utils.common.typeutils import checked_cast
+from pyre_extensions import assert_is_instance
 
 if TYPE_CHECKING:
     # import as module to make sphinx-autodoc-typehints happy
@@ -36,10 +36,10 @@ class SearchSpaceToChoice(Transform):
 
     def __init__(
         self,
-        search_space: Optional[SearchSpace] = None,
-        observations: Optional[list[Observation]] = None,
+        search_space: SearchSpace | None = None,
+        observations: list[Observation] | None = None,
         modelbridge: Optional["modelbridge_module.base.ModelBridge"] = None,
-        config: Optional[TConfig] = None,
+        config: TConfig | None = None,
     ) -> None:
         assert search_space is not None, "SearchSpaceToChoice requires search space"
         assert observations is not None, "SeachSpaceToChoice requires observations"
@@ -71,7 +71,10 @@ class SearchSpaceToChoice(Transform):
                 name=self.parameter_name,
                 parameter_type=ParameterType.STRING,
                 values=values,
-                is_ordered=checked_cast(bool, self.config.get("use_ordered", False)),
+                is_ordered=assert_is_instance(
+                    self.config.get("use_ordered", False),
+                    bool,
+                ),
                 sort_values=False,
             )
         else:
@@ -86,15 +89,19 @@ class SearchSpaceToChoice(Transform):
         self, observation_features: list[ObservationFeatures]
     ) -> list[ObservationFeatures]:
         for obsf in observation_features:
-            obsf.parameters = {
-                self.parameter_name: Arm(parameters=obsf.parameters).signature
-            }
+            # if obsf.parameters is not an empty dict
+            if len(obsf.parameters) != 0:
+                obsf.parameters = {
+                    self.parameter_name: Arm(parameters=obsf.parameters).signature
+                }
         return observation_features
 
     def untransform_observation_features(
         self, observation_features: list[ObservationFeatures]
     ) -> list[ObservationFeatures]:
         for obsf in observation_features:
-            signature = obsf.parameters[self.parameter_name]
-            obsf.parameters = self.signature_to_parameterization[signature]
+            # Do not untransform empty dict as it wasn't transformed in the first place
+            if len(obsf.parameters) != 0:
+                signature = obsf.parameters[self.parameter_name]
+                obsf.parameters = self.signature_to_parameterization[signature]
         return observation_features

@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any
 
 import torch
 from ax.core.search_space import SearchSpaceDigest
@@ -20,8 +20,7 @@ from botorch.models.transforms.input import (
     Normalize,
     Warp,
 )
-from botorch.utils.containers import SliceContainer
-from botorch.utils.datasets import RankingDataset, SupervisedDataset
+from botorch.utils.datasets import SupervisedDataset
 from botorch.utils.dispatcher import Dispatcher
 
 
@@ -33,9 +32,9 @@ input_transform_argparse = Dispatcher(
 @input_transform_argparse.register(InputTransform)
 def _input_transform_argparse_base(
     input_transform_class: type[InputTransform],
-    dataset: Optional[SupervisedDataset] = None,
-    search_space_digest: Optional[SearchSpaceDigest] = None,
-    input_transform_options: Optional[dict[str, Any]] = None,
+    dataset: SupervisedDataset | None = None,
+    search_space_digest: SearchSpaceDigest | None = None,
+    input_transform_options: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Extract the input transform kwargs from the given arguments.
@@ -63,7 +62,7 @@ def _input_transform_argparse_warp(
     input_transform_class: type[Warp],
     dataset: SupervisedDataset,
     search_space_digest: SearchSpaceDigest,
-    input_transform_options: Optional[dict[str, Any]] = None,
+    input_transform_options: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Extract the base input transform kwargs form the given arguments.
 
@@ -93,9 +92,9 @@ def _input_transform_argparse_normalize(
     input_transform_class: type[Normalize],
     dataset: SupervisedDataset,
     search_space_digest: SearchSpaceDigest,
-    input_transform_options: Optional[dict[str, Any]] = None,
-    torch_device: Optional[torch.device] = None,
-    torch_dtype: Optional[torch.dtype] = None,
+    input_transform_options: dict[str, Any] | None = None,
+    torch_device: torch.device | None = None,
+    torch_dtype: torch.dtype | None = None,
 ) -> dict[str, Any]:
     """
     Extract the base input transform kwargs form the given arguments.
@@ -113,26 +112,29 @@ def _input_transform_argparse_normalize(
         A dictionary with input transform kwargs.
     """
     input_transform_options = input_transform_options or {}
-    d = input_transform_options.get("d", len(dataset.feature_names))
+
+    d = input_transform_options.get("d", len(search_space_digest.feature_names))
+    input_transform_options["d"] = d
+
+    indices = list(range(d))
+    # having indices set to None means that we don't remove task features
+    if ("indices" in input_transform_options) and (
+        input_transform_options["indices"] is None
+    ):
+        input_transform_options["indices"] = indices
+    else:
+        task_features = normalize_indices(search_space_digest.task_features, d=d)
+        for task_feature in sorted(task_features, reverse=True):
+            del indices[task_feature]
+
+    if ("indices" in input_transform_options) or (len(indices) < d):
+        input_transform_options.setdefault("indices", indices)
+
     bounds = torch.as_tensor(
         search_space_digest.bounds,
         dtype=torch_dtype,
         device=torch_device,
     ).T
-
-    if isinstance(dataset, RankingDataset) and isinstance(dataset.X, SliceContainer):
-        d = dataset.X.values.shape[-1]
-
-    indices = list(range(d))
-    task_features = normalize_indices(search_space_digest.task_features, d=d)
-
-    for task_feature in sorted(task_features, reverse=True):
-        del indices[task_feature]
-
-    input_transform_options.setdefault("d", d)
-
-    if ("indices" in input_transform_options) or (len(indices) < d):
-        input_transform_options.setdefault("indices", indices)
 
     if (
         ("bounds" not in input_transform_options)
@@ -153,10 +155,10 @@ def _input_transform_argparse_normalize(
 def _input_transform_argparse_input_perturbation(
     input_transform_class: type[InputPerturbation],
     search_space_digest: SearchSpaceDigest,
-    dataset: Optional[SupervisedDataset] = None,
-    input_transform_options: Optional[dict[str, Any]] = None,
-    torch_device: Optional[torch.device] = None,
-    torch_dtype: Optional[torch.dtype] = None,
+    dataset: SupervisedDataset | None = None,
+    input_transform_options: dict[str, Any] | None = None,
+    torch_device: torch.device | None = None,
+    torch_dtype: torch.dtype | None = None,
 ) -> dict[str, Any]:
     """Extract the base input transform kwargs form the given arguments.
 

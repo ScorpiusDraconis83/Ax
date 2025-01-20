@@ -10,14 +10,14 @@ from __future__ import annotations
 
 import math
 import warnings
-from collections.abc import Hashable, Mapping
+from collections.abc import Callable, Hashable, Mapping
 from dataclasses import dataclass, field
 from functools import reduce
 from logging import Logger
 from random import choice, uniform
-from typing import Callable, Optional, Union
+from typing import Sequence
 
-import numpy as np
+import numpy.typing as npt
 import pandas as pd
 from ax import core
 from ax.core.arm import Arm
@@ -40,7 +40,7 @@ from ax.exceptions.core import AxWarning, UnsupportedError, UserInputError
 from ax.utils.common.base import Base
 from ax.utils.common.constants import Keys
 from ax.utils.common.logger import get_logger
-from ax.utils.common.typeutils import not_none
+from pyre_extensions import none_throws
 from scipy.special import expit, logit
 
 
@@ -67,8 +67,8 @@ class SearchSpace(Base):
 
     def __init__(
         self,
-        parameters: list[Parameter],
-        parameter_constraints: Optional[list[ParameterConstraint]] = None,
+        parameters: Sequence[Parameter],
+        parameter_constraints: list[ParameterConstraint] | None = None,
     ) -> None:
         """Initialize SearchSpace
 
@@ -176,9 +176,7 @@ class SearchSpace(Base):
         self._parameters[parameter.name] = parameter
 
     def check_all_parameters_present(
-        self,
-        parameterization: TParameterization,
-        raise_error: bool = False,
+        self, parameterization: Mapping[str, TParamValue], raise_error: bool = False
     ) -> bool:
         """Whether a given parameterization contains all the parameters in the
         search space.
@@ -204,7 +202,7 @@ class SearchSpace(Base):
 
     def check_membership(
         self,
-        parameterization: TParameterization,
+        parameterization: Mapping[str, TParamValue],
         raise_error: bool = False,
         check_all_parameters_present: bool = True,
     ) -> bool:
@@ -241,7 +239,7 @@ class SearchSpace(Base):
 
         # parameter constraints only accept numeric parameters
         numerical_param_dict = {
-            name: float(not_none(value))
+            name: float(none_throws(value))
             for name, value in parameterization.items()
             if self.parameters[name].is_numeric
         }
@@ -258,6 +256,7 @@ class SearchSpace(Base):
         self,
         parameterization: TParameterization,
         allow_none: bool = True,
+        allow_extra_params: bool = True,
         raise_error: bool = False,
     ) -> bool:
         """Checks that the given parameterization's types match the search space.
@@ -265,6 +264,7 @@ class SearchSpace(Base):
         Args:
             parameterization: Dict from parameter name to value to validate.
             allow_none: Whether None is a valid parameter value.
+            allow_extra_params: If parameterization can have params not in search space.
             raise_error: If true and parameterization does not belong, raises an error
                 with detailed explanation of why.
 
@@ -273,9 +273,12 @@ class SearchSpace(Base):
         """
         for name, value in parameterization.items():
             if name not in self.parameters:
-                if raise_error:
+                if allow_extra_params:
+                    continue
+                elif raise_error:
                     raise ValueError(f"Parameter {name} not defined in search space")
-                return False
+                else:
+                    return False
 
             if value is None and allow_none:
                 continue
@@ -326,7 +329,7 @@ class SearchSpace(Base):
         return self.construct_arm()
 
     def construct_arm(
-        self, parameters: Optional[TParameterization] = None, name: Optional[str] = None
+        self, parameters: TParameterization | None = None, name: str | None = None
     ) -> Arm:
         """Construct new arm using given parameters and name. Any missing parameters
         fallback to the experiment defaults, represented as None.
@@ -343,7 +346,7 @@ class SearchSpace(Base):
                     raise ValueError(
                         f"`{p_value}` is not a valid value for parameter {p_name}."
                     )
-            final_parameters.update(not_none(parameters))
+            final_parameters.update(none_throws(parameters))
         return Arm(parameters=final_parameters, name=name)
 
     def clone(self) -> SearchSpace:
@@ -440,7 +443,7 @@ class HierarchicalSearchSpace(SearchSpace):
     def __init__(
         self,
         parameters: list[Parameter],
-        parameter_constraints: Optional[list[ParameterConstraint]] = None,
+        parameter_constraints: list[ParameterConstraint] | None = None,
     ) -> None:
         super().__init__(
             parameters=parameters, parameter_constraints=parameter_constraints
@@ -530,7 +533,7 @@ class HierarchicalSearchSpace(SearchSpace):
 
         if has_full_parameterization:
             # If full parameterization is recorded, use it to fill in missing values.
-            full_parameterization = not_none(obs_feats.metadata)[
+            full_parameterization = none_throws(obs_feats.metadata)[
                 Keys.FULL_PARAMETERIZATION
             ]
             obs_feats.parameters = {**full_parameterization, **obs_feats.parameters}
@@ -562,7 +565,7 @@ class HierarchicalSearchSpace(SearchSpace):
 
     def check_membership(
         self,
-        parameterization: TParameterization,
+        parameterization: Mapping[str, TParamValue],
         raise_error: bool = False,
         check_all_parameters_present: bool = True,
     ) -> bool:
@@ -626,10 +629,10 @@ class HierarchicalSearchSpace(SearchSpace):
                 representation.
         """
 
-        def _hrepr(param: Optional[Parameter], value: Optional[str], level: int) -> str:
+        def _hrepr(param: Parameter | None, value: str | None, level: int) -> str:
             is_level_param = param and not value
             if is_level_param:
-                param = not_none(param)
+                param = none_throws(param)
                 node_name = f"{param.name if parameter_names_only else param}"
                 ret = "\t" * level + node_name + "\n"
                 if param.is_hierarchical:
@@ -642,7 +645,7 @@ class HierarchicalSearchSpace(SearchSpace):
                                 level=level + 2,
                             )
             else:
-                value = not_none(value)
+                value = none_throws(value)
                 node_name = f"({value})"
                 ret = "\t" * level + node_name + "\n"
 
@@ -668,7 +671,7 @@ class HierarchicalSearchSpace(SearchSpace):
 
     def _cast_parameterization(
         self,
-        parameters: TParameterization,
+        parameters: Mapping[str, TParamValue],
         check_all_parameters_present: bool = True,
     ) -> TParameterization:
         """Cast parameterization (of an arm, observation features, etc.) to the
@@ -715,7 +718,7 @@ class HierarchicalSearchSpace(SearchSpace):
         ):
             raise RuntimeError(
                 error_msg_prefix
-                + f"Parameters {applicable_paramers- set(parameters.keys())} are"
+                + f"Parameters {applicable_paramers - set(parameters.keys())} are"
                 " missing."
             )
 
@@ -862,8 +865,8 @@ class RobustSearchSpace(SearchSpace):
         parameters: list[Parameter],
         parameter_distributions: list[ParameterDistribution],
         num_samples: int,
-        environmental_variables: Optional[list[Parameter]] = None,
-        parameter_constraints: Optional[list[ParameterConstraint]] = None,
+        environmental_variables: list[Parameter] | None = None,
+        parameter_constraints: list[ParameterConstraint] | None = None,
     ) -> None:
         """Initialize the robust search space.
 
@@ -1072,16 +1075,14 @@ class SearchSpaceDigest:
     """
 
     feature_names: list[str]
-    bounds: list[tuple[Union[int, float], Union[int, float]]]
+    bounds: list[tuple[int | float, int | float]]
     ordinal_features: list[int] = field(default_factory=list)
     categorical_features: list[int] = field(default_factory=list)
-    discrete_choices: Mapping[int, list[Union[int, float]]] = field(
-        default_factory=dict
-    )
+    discrete_choices: Mapping[int, Sequence[int | float]] = field(default_factory=dict)
     task_features: list[int] = field(default_factory=list)
     fidelity_features: list[int] = field(default_factory=list)
-    target_values: dict[int, Union[int, float]] = field(default_factory=dict)
-    robust_digest: Optional[RobustSearchSpaceDigest] = None
+    target_values: dict[int, int | float] = field(default_factory=dict)
+    robust_digest: RobustSearchSpaceDigest | None = None
 
 
 @dataclass
@@ -1105,8 +1106,8 @@ class RobustSearchSpaceDigest:
             Only relevant if paired with a `distribution_sampler`.
     """
 
-    sample_param_perturbations: Optional[Callable[[], np.ndarray]] = None
-    sample_environmental: Optional[Callable[[], np.ndarray]] = None
+    sample_param_perturbations: Callable[[], npt.NDArray] | None = None
+    sample_environmental: Callable[[], npt.NDArray] | None = None
     environmental_variables: list[str] = field(default_factory=list)
     multiplicative: bool = False
 

@@ -8,11 +8,13 @@
 
 import math
 from collections import Counter
+from collections.abc import Callable
 
 from logging import Logger
-from typing import Any, Callable, Optional, Union
+from typing import Any, Optional, Union
 
 import numpy as np
+import numpy.typing as npt
 from ax.core.generator_run import GeneratorRun
 from ax.core.observation import Observation, ObservationFeatures
 from ax.core.parameter import ChoiceParameter, FixedParameter, Parameter, RangeParameter
@@ -25,7 +27,7 @@ from ax.modelbridge.prediction_utils import (
 from ax.modelbridge.transforms.ivw import IVW
 from ax.plot.base import DECIMALS, PlotData, PlotInSampleArm, PlotOutOfSampleArm, Z
 from ax.utils.common.logger import get_logger
-from ax.utils.common.typeutils import not_none
+from pyre_extensions import none_throws
 
 logger: Logger = get_logger(__name__)
 
@@ -70,7 +72,7 @@ def _format_dict(param_dict: TParameterization, name: str = "Parameterization") 
         )
     else:
         blob = "<br><em>{}:</em><br>{}".format(
-            name, "<br>".join("{}: {}".format(n, v) for n, v in param_dict.items())
+            name, "<br>".join(f"{n}: {v}" for n, v in param_dict.items())
         )
     return blob
 
@@ -108,7 +110,7 @@ def _format_CI(estimate: float, sd: float, relative: bool, zval: float = Z) -> s
     )
 
 
-def arm_name_to_tuple(arm_name: str) -> Union[tuple[int, int], tuple[int]]:
+def arm_name_to_tuple(arm_name: str) -> tuple[int, int] | tuple[int]:
     tup = arm_name.split("_")
     if len(tup) == 2:
         try:
@@ -149,9 +151,9 @@ def _filter_dict(
 def _get_in_sample_arms(
     model: ModelBridge,
     metric_names: set[str],
-    fixed_features: Optional[ObservationFeatures] = None,
-    data_selector: Optional[Callable[[Observation], bool]] = None,
-    scalarized_metric_config: Optional[list[dict[str, dict[str, float]]]] = None,
+    fixed_features: ObservationFeatures | None = None,
+    data_selector: Callable[[Observation], bool] | None = None,
+    scalarized_metric_config: list[dict[str, dict[str, float]]] | None = None,
 ) -> tuple[dict[str, PlotInSampleArm], RawData, dict[str, TParameterization]]:
     """Get in-sample arms from a model with observed and predicted values
     for specified metrics.
@@ -267,8 +269,8 @@ def _get_in_sample_arms(
         else:
             pred_y = obs_y
             pred_se = obs_se
-        in_sample_plot[not_none(obs.arm_name)] = PlotInSampleArm(
-            name=not_none(obs.arm_name),
+        in_sample_plot[none_throws(obs.arm_name)] = PlotInSampleArm(
+            name=none_throws(obs.arm_name),
             y=obs_y,
             se=obs_se,
             parameters=obs.features.parameters,
@@ -283,8 +285,8 @@ def _get_out_of_sample_arms(
     model: ModelBridge,
     generator_runs_dict: dict[str, GeneratorRun],
     metric_names: set[str],
-    fixed_features: Optional[ObservationFeatures] = None,
-    scalarized_metric_config: Optional[list[dict[str, dict[str, float]]]] = None,
+    fixed_features: ObservationFeatures | None = None,
+    scalarized_metric_config: list[dict[str, dict[str, float]]] | None = None,
 ) -> dict[str, dict[str, PlotOutOfSampleArm]]:
     """Get out-of-sample predictions from a model given a dict of generator runs.
 
@@ -336,10 +338,10 @@ def _get_out_of_sample_arms(
 def get_plot_data(
     model: ModelBridge,
     generator_runs_dict: dict[str, GeneratorRun],
-    metric_names: Optional[set[str]] = None,
-    fixed_features: Optional[ObservationFeatures] = None,
-    data_selector: Optional[Callable[[Observation], bool]] = None,
-    scalarized_metric_config: Optional[list[dict[str, dict[str, float]]]] = None,
+    metric_names: set[str] | None = None,
+    fixed_features: ObservationFeatures | None = None,
+    data_selector: Callable[[Observation], bool] | None = None,
+    scalarized_metric_config: list[dict[str, dict[str, float]]] | None = None,
 ) -> tuple[PlotData, RawData, dict[str, TParameterization]]:
     """Format data object with metrics for in-sample and out-of-sample
     arms.
@@ -390,12 +392,11 @@ def get_plot_data(
         fixed_features=fixed_features,
         scalarized_metric_config=scalarized_metric_config,
     )
-    status_quo_name = None if model.status_quo is None else model.status_quo.arm_name
     plot_data = PlotData(
         metrics=list(metrics_plot),
         in_sample=in_sample_plot,
         out_of_sample=out_of_sample_plot,
-        status_quo_name=status_quo_name,
+        status_quo_name=model.status_quo_name,
     )
     return plot_data, raw_data, cond_name_to_parameters
 
@@ -460,7 +461,7 @@ def get_range_parameters(
     )
 
 
-def get_grid_for_parameter(parameter: RangeParameter, density: int) -> np.ndarray:
+def get_grid_for_parameter(parameter: RangeParameter, density: int) -> npt.NDArray:
     """Get a grid of points along the range of the parameter.
 
     Will be a log-scale grid if parameter is log scale.
@@ -482,8 +483,8 @@ def get_grid_for_parameter(parameter: RangeParameter, density: int) -> np.ndarra
 
 def get_fixed_values(
     model: ModelBridge,
-    slice_values: Optional[dict[str, Any]] = None,
-    trial_index: Optional[int] = None,
+    slice_values: dict[str, Any] | None = None,
+    trial_index: int | None = None,
 ) -> TParameterization:
     """Get fixed values for parameters in a slice plot.
 
@@ -528,6 +529,7 @@ def get_fixed_values(
             elif isinstance(parameter, ChoiceParameter):
                 setx[p_name] = Counter(vals).most_common(1)[0][0]
             elif isinstance(parameter, RangeParameter):
+                # pyre-fixme[6]: For 1st argument expected `Union[_SupportsArray[dtyp...
                 setx[p_name] = parameter.cast(np.mean(vals))
 
     if slice_values is not None:
@@ -790,7 +792,7 @@ def infer_is_relative(
     relative = {}
     constraint_relativity = {}
     if model._optimization_config:
-        constraints = not_none(model._optimization_config).outcome_constraints
+        constraints = none_throws(model._optimization_config).outcome_constraints
         constraint_relativity = {
             constraint.metric.name: constraint.relative for constraint in constraints
         }

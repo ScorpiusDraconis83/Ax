@@ -8,7 +8,6 @@
 
 from collections.abc import Iterable
 from logging import Logger
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -17,7 +16,7 @@ from ax.early_stopping.strategies.base import BaseEarlyStoppingStrategy
 from ax.early_stopping.utils import align_partial_results
 from ax.exceptions.core import UnsupportedError
 from ax.utils.common.logger import get_logger
-from ax.utils.common.typeutils import not_none
+from pyre_extensions import none_throws
 
 logger: Logger = get_logger(__name__)
 
@@ -28,13 +27,12 @@ class PercentileEarlyStoppingStrategy(BaseEarlyStoppingStrategy):
 
     def __init__(
         self,
-        metric_names: Optional[Iterable[str]] = None,
-        seconds_between_polls: int = 300,
+        metric_names: Iterable[str] | None = None,
         percentile_threshold: float = 50.0,
-        min_progression: Optional[float] = 10,
-        max_progression: Optional[float] = None,
-        min_curves: Optional[int] = 5,
-        trial_indices_to_ignore: Optional[list[int]] = None,
+        min_progression: float | None = 10,
+        max_progression: float | None = None,
+        min_curves: int | None = 5,
+        trial_indices_to_ignore: list[int] | None = None,
         normalize_progressions: bool = False,
     ) -> None:
         """Construct a PercentileEarlyStoppingStrategy instance.
@@ -43,8 +41,6 @@ class PercentileEarlyStoppingStrategy(BaseEarlyStoppingStrategy):
             metric_names: A (length-one) list of name of the metric to observe. If
                 None will default to the objective metric on the Experiment's
                 OptimizationConfig.
-            seconds_between_polls: How often to poll the early stopping metric to
-                evaluate whether or not the trial should be early stopped.
             percentile_threshold: Falling below this threshold compared to other trials
                 at the same step will stop the run. Must be between 0.0 and 100.0.
                 e.g. if percentile_threshold=25.0, the bottom 25% of trials are stopped.
@@ -72,7 +68,6 @@ class PercentileEarlyStoppingStrategy(BaseEarlyStoppingStrategy):
         """
         super().__init__(
             metric_names=metric_names,
-            seconds_between_polls=seconds_between_polls,
             trial_indices_to_ignore=trial_indices_to_ignore,
             min_progression=min_progression,
             max_progression=max_progression,
@@ -93,7 +88,7 @@ class PercentileEarlyStoppingStrategy(BaseEarlyStoppingStrategy):
         self,
         trial_indices: set[int],
         experiment: Experiment,
-    ) -> dict[int, Optional[str]]:
+    ) -> dict[int, str | None]:
         """Stop a trial if its performance is in the bottom `percentile_threshold`
         of the trials at the same step.
 
@@ -165,7 +160,7 @@ class PercentileEarlyStoppingStrategy(BaseEarlyStoppingStrategy):
         df_raw: pd.DataFrame,
         map_key: str,
         minimize: bool,
-    ) -> tuple[bool, Optional[str]]:
+    ) -> tuple[bool, str | None]:
         """Stop a trial if its performance is in the bottom `percentile_threshold`
         of the trials at the same step.
 
@@ -194,7 +189,7 @@ class PercentileEarlyStoppingStrategy(BaseEarlyStoppingStrategy):
         # dropna() here will exclude trials that have not made it to the
         # last progression of the trial under consideration, and therefore
         # can't be included in the comparison
-        df_trial = not_none(df[trial_index].dropna())
+        df_trial = none_throws(df[trial_index].dropna())
         trial_last_prog = df_trial.index.max()
         data_at_last_progression = df.loc[trial_last_prog].dropna()
         logger.info(

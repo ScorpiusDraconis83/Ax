@@ -7,9 +7,10 @@
 # pyre-strict
 
 from logging import Logger
-from typing import Any, Optional, Union
+from typing import Any
 
 import numpy as np
+import numpy.typing as npt
 import pandas as pd
 import plotly.graph_objs as go
 from ax.core.parameter import ChoiceParameter
@@ -101,12 +102,12 @@ def plot_feature_importance_by_metric(model: ModelBridge) -> AxPlotConfig:
 
 
 def plot_feature_importance_by_feature_plotly(
-    model: Optional[ModelBridge] = None,
-    sensitivity_values: Optional[dict[str, dict[str, Union[float, np.ndarray]]]] = None,
+    model: ModelBridge | None = None,
+    sensitivity_values: dict[str, dict[str, float | npt.NDArray]] | None = None,
     relative: bool = False,
     caption: str = "",
     importance_measure: str = "",
-    label_dict: Optional[dict[str, str]] = None,
+    label_dict: dict[str, str] | None = None,
 ) -> go.Figure:
     """One plot per metric, showing importances by feature.
 
@@ -193,6 +194,9 @@ def plot_feature_importance_by_feature_plotly(
                         sign_col: (
                             0
                             if factor in categorical_features
+                            # pyre-fixme[16]: Item `bool` of
+                            #  `Union[ndarray[typing.Any, np.dtype[typing.Any]], bool]`
+                            #  has no attribute `astype`.
                             else 2 * (importance >= 0).astype(int) - 1
                         ),
                     }
@@ -253,21 +257,17 @@ def plot_feature_importance_by_feature_plotly(
         }
     ]
     features = list(list(sensitivity_values.values())[0].keys())
-    title = "Normalized parameter sensitivity" if relative else "Parameter sensitivity"
-    if importance_measure:
-        title = title + " using " + importance_measure
+
     longest_label = max(len(f) for f in features)
     longest_metric = max(len(m) for m in sensitivity_values.keys())
+
     layout = go.Layout(
         height=200 + len(features) * 20,
         width=10 * longest_label + max(10 * longest_metric, 400),
         hovermode="closest",
-        margin=go.layout.Margin(
-            l=8 * min(max(len(idx) for idx in features), 75)
-        ),  # noqa E741
-        title=title,
-        updatemenus=updatemenus,
         annotations=compose_annotation(caption=caption),
+        title=f"Parameter Sensitivity by {importance_measure}",
+        updatemenus=updatemenus,
     )
 
     if relative:
@@ -277,12 +277,12 @@ def plot_feature_importance_by_feature_plotly(
 
 
 def plot_feature_importance_by_feature(
-    model: Optional[ModelBridge] = None,
-    sensitivity_values: Optional[dict[str, dict[str, Union[float, np.ndarray]]]] = None,
+    model: ModelBridge | None = None,
+    sensitivity_values: dict[str, dict[str, float | npt.NDArray]] | None = None,
     relative: bool = False,
     caption: str = "",
     importance_measure: str = "",
-    label_dict: Optional[dict[str, str]] = None,
+    label_dict: dict[str, str] | None = None,
 ) -> AxPlotConfig:
     """Wrapper method to convert `plot_feature_importance_by_feature_plotly` to
     AxPlotConfig"""
@@ -311,7 +311,7 @@ def plot_relative_feature_importance_plotly(model: ModelBridge) -> go.Figure:
             importances.append(vals)
         except Exception:
             logger.warning(
-                "Model for {} does not support feature importances.".format(metric_name)
+                f"Model for {metric_name} does not support feature importances."
             )
     df = pd.DataFrame(importances)
     df.set_index("index", inplace=True)

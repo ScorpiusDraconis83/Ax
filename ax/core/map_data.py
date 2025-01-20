@@ -7,14 +7,16 @@
 
 from __future__ import annotations
 
+from bisect import bisect_right
 from collections.abc import Iterable, Sequence
 from copy import deepcopy
 from logging import Logger
-from typing import Any, Generic, Optional, TypeVar
+from typing import Any, Generic, TypeVar
 
 import numpy as np
+import numpy.typing as npt
 import pandas as pd
-from ax.core.data import Data
+from ax.core.data import _filter_df, Data
 from ax.core.types import TMapTrialEvaluation
 from ax.exceptions.core import UnsupportedError
 from ax.utils.common.base import SortableBase
@@ -26,7 +28,7 @@ from ax.utils.common.serialization import (
     TClassDecoderRegistry,
     TDecoderRegistry,
 )
-from ax.utils.common.typeutils import checked_cast
+from pyre_extensions import assert_is_instance
 
 logger: Logger = get_logger(__name__)
 
@@ -96,18 +98,32 @@ class MapData(Data):
     DEDUPLICATE_BY_COLUMNS = ["arm_name", "metric_name"]
 
     _map_df: pd.DataFrame
-    _memo_df: Optional[pd.DataFrame]
+    _memo_df: pd.DataFrame | None
 
     # pyre-fixme[24]: Generic type `MapKeyInfo` expects 1 type parameter.
     _map_key_infos: list[MapKeyInfo]
 
     def __init__(
         self,
-        df: Optional[pd.DataFrame] = None,
+        df: pd.DataFrame | None = None,
         # pyre-fixme[24]: Generic type `MapKeyInfo` expects 1 type parameter.
-        map_key_infos: Optional[Iterable[MapKeyInfo]] = None,
-        description: Optional[str] = None,
+        map_key_infos: Iterable[MapKeyInfo] | None = None,
+        description: str | None = None,
+        _skip_ordering_and_validation: bool = False,
     ) -> None:
+        """Initialize a ``MapData`` object from the given DataFrame and MapKeyInfos.
+
+        Args:
+            df: DataFrame with underlying data, and required columns.
+            map_key_infos: A list of MapKeyInfo objects, each of which contains
+                information about the mapping-like structure of the data.
+                See the class docstring for additional information.
+            description: Human-readable description of data.
+            _skip_ordering_and_validation: If True, uses the given DataFrame
+                as is, without ordering its columns or validating its contents.
+                Intended only for use in `MapData.filter`, where the contents
+                of the DataFrame are known to be ordered and valid.
+        """
         if map_key_infos is None and df is not None:
             raise ValueError("map_key_infos may be `None` iff `df` is None.")
 
@@ -118,6 +134,8 @@ class MapData(Data):
             self._map_df = pd.DataFrame(
                 columns=list(self.required_columns().union(self.map_keys))
             )
+        elif _skip_ordering_and_validation:
+            self._map_df = df
         else:
             columns = set(df.columns)
             missing_columns = self.required_columns() - columns
@@ -174,7 +192,7 @@ class MapData(Data):
     @staticmethod
     def from_multiple_map_data(
         data: Sequence[MapData],
-        subset_metrics: Optional[Iterable[str]] = None,
+        subset_metrics: Iterable[str] | None = None,
     ) -> MapData:
         if len(data) == 0:
             return MapData()
@@ -182,7 +200,10 @@ class MapData(Data):
         unique_map_key_infos = []
         for mki in (mki for datum in data for mki in datum.map_key_infos):
             if any(
-                mki.key == unique.key and mki.default_value != unique.default_value
+                mki.key == unique.key
+                and not np.isclose(
+                    mki.default_value, unique.default_value, equal_nan=True
+                )
                 for unique in unique_map_key_infos
             ):
                 logger.warning(f"MapKeyInfo conflict for {mki.key}, eliding {mki}.")
@@ -208,7 +229,7 @@ class MapData(Data):
         evaluations: dict[str, TMapTrialEvaluation],
         trial_index: int,
         # pyre-fixme[24]: Generic type `MapKeyInfo` expects 1 type parameter.
-        map_key_infos: Optional[Iterable[MapKeyInfo]] = None,
+        map_key_infos: Iterable[MapKeyInfo] | None = None,
     ) -> MapData:
         records = [
             {
@@ -230,7 +251,7 @@ class MapData(Data):
             for key in map_dict.keys()
         }
         map_key_infos = map_key_infos or [
-            MapKeyInfo(key=key, default_value=0.0) for key in map_keys
+            MapKeyInfo(key=key, default_value=np.nan) for key in map_keys
         ]
 
         if {mki.key for mki in map_key_infos} != map_keys:
@@ -250,10 +271,11 @@ class MapData(Data):
             + " MapData via `__init__` or `from_multiple_data`."
         )
 
-    @staticmethod
+    @classmethod
     def from_multiple_data(
+        cls,
         data: Iterable[Data],
-        subset_metrics: Optional[Iterable[str]] = None,
+        subset_metrics: Iterable[str] | None = None,
     ) -> MapData:
         """Downcast instances of Data into instances of MapData with empty
         map_key_infos if necessary then combine as usual (filling in empty cells with
@@ -261,26 +283,25 @@ class MapData(Data):
         """
         map_datas = [
             (
-                MapData(df=datum.df, map_key_infos=[])
+                cls(df=datum.df, map_key_infos=[])
                 if not isinstance(datum, MapData)
                 else datum
             )
             for datum in data
         ]
 
-        return MapData.from_multiple_map_data(
-            data=map_datas, subset_metrics=subset_metrics
-        )
+        return cls.from_multiple_map_data(data=map_datas, subset_metrics=subset_metrics)
 
     @property
     def df(self) -> pd.DataFrame:
-        """Returns a Data shaped DataFrame"""
-
-        # If map_keys is empty just return the df
+        """Returns a DataFrame that only contains the last (determined by map keys)
+        observation for each (arm, metric) pair.
+        """
         if self._memo_df is not None:
             return self._memo_df
 
         if len(self.map_keys) == 0:
+            # If map_keys is empty just return the df
             return self.map_df
 
         self._memo_df = self.map_df.sort_values(self.map_keys).drop_duplicates(
@@ -292,22 +313,24 @@ class MapData(Data):
     @copy_doc(Data.filter)
     def filter(
         self,
-        trial_indices: Optional[Iterable[int]] = None,
-        metric_names: Optional[Iterable[str]] = None,
+        trial_indices: Iterable[int] | None = None,
+        metric_names: Iterable[str] | None = None,
     ) -> MapData:
-
-        return MapData(
-            df=self._filter_df(
+        return self.__class__(
+            df=_filter_df(
                 df=self.map_df, trial_indices=trial_indices, metric_names=metric_names
             ),
             map_key_infos=self.map_key_infos,
+            _skip_ordering_and_validation=True,
         )
 
     @classmethod
     # pyre-fixme[2]: Parameter annotation cannot be `Any`.
     def serialize_init_args(cls, obj: Any) -> dict[str, Any]:
-        map_data = checked_cast(MapData, obj)
-        properties = serialize_init_args(obj=map_data)
+        map_data = assert_is_instance(obj, MapData)
+        properties = serialize_init_args(
+            obj=map_data, exclude_fields=["_skip_ordering_and_validation"]
+        )
         properties["df"] = map_data.map_df
         properties["map_key_infos"] = [
             serialize_init_args(obj=mki) for mki in properties["map_key_infos"]
@@ -318,8 +341,8 @@ class MapData(Data):
     def deserialize_init_args(
         cls,
         args: dict[str, Any],
-        decoder_registry: Optional[TDecoderRegistry] = None,
-        class_decoder_registry: Optional[TClassDecoderRegistry] = None,
+        decoder_registry: TDecoderRegistry | None = None,
+        class_decoder_registry: TClassDecoderRegistry | None = None,
     ) -> dict[str, Any]:
         """Given a dictionary, extract the properties needed to initialize the metric.
         Used for storage.
@@ -341,10 +364,10 @@ class MapData(Data):
 
     def subsample(
         self,
-        map_key: Optional[str] = None,
-        keep_every: Optional[int] = None,
-        limit_rows_per_group: Optional[int] = None,
-        limit_rows_per_metric: Optional[int] = None,
+        map_key: str | None = None,
+        keep_every: int | None = None,
+        limit_rows_per_group: int | None = None,
+        limit_rows_per_metric: int | None = None,
         include_first_last: bool = True,
     ) -> MapData:
         """Subsample the `map_key` column in an equally-spaced manner (if there is
@@ -394,7 +417,7 @@ class MapData(Data):
             map_key = self.map_keys[0]
         subsampled_metric_dfs = []
         for metric_name in self.map_df["metric_name"].unique():
-            metric_map_df = self._filter_df(self.map_df, metric_names=[metric_name])
+            metric_map_df = _filter_df(self.map_df, metric_names=[metric_name])
             subsampled_metric_dfs.append(
                 _subsample_one_metric(
                     metric_map_df,
@@ -413,39 +436,72 @@ class MapData(Data):
         )
 
 
+def _ceil_divide(
+    a: int | np.int_ | npt.NDArray[np.int_], b: int | np.int_ | npt.NDArray[np.int_]
+) -> np.int_ | npt.NDArray[np.int_]:
+    return -np.floor_divide(-a, b)
+
+
+def _subsample_rate(
+    map_df: pd.DataFrame,
+    keep_every: int | None = None,
+    limit_rows_per_group: int | None = None,
+    limit_rows_per_metric: int | None = None,
+) -> int:
+    if keep_every is not None:
+        return keep_every
+
+    grouped_map_df = map_df.groupby(MapData.DEDUPLICATE_BY_COLUMNS)
+    group_sizes = grouped_map_df.size()
+    max_rows = group_sizes.max()
+
+    if limit_rows_per_group is not None:
+        return _ceil_divide(max_rows, limit_rows_per_group).item()
+
+    if limit_rows_per_metric is not None:
+        # search for the `keep_every` such that when you apply it to each group,
+        # the total number of rows is smaller than `limit_rows_per_metric`.
+        ks = np.arange(max_rows, 0, -1)
+        # total sizes in ascending order
+        total_sizes = np.sum(
+            _ceil_divide(group_sizes.values, ks[..., np.newaxis]), axis=1
+        )
+        # binary search
+        i = bisect_right(total_sizes, limit_rows_per_metric)
+        # if no such `k` is found, then `derived_keep_every` stays as 1.
+        if i > 0:
+            return ks[i - 1].item()
+
+    raise ValueError(
+        "at least one of `keep_every`, `limit_rows_per_group`, "
+        "or `limit_rows_per_metric` must be specified."
+    )
+
+
 def _subsample_one_metric(
     map_df: pd.DataFrame,
-    map_key: Optional[str] = None,
-    keep_every: Optional[int] = None,
-    limit_rows_per_group: Optional[int] = None,
-    limit_rows_per_metric: Optional[int] = None,
+    map_key: str | None = None,
+    keep_every: int | None = None,
+    limit_rows_per_group: int | None = None,
+    limit_rows_per_metric: int | None = None,
     include_first_last: bool = True,
 ) -> pd.DataFrame:
     """Helper function to subsample a dataframe that holds a single metric."""
-    derived_keep_every = 1
-    if keep_every is not None:
-        derived_keep_every = keep_every
-    elif limit_rows_per_group is not None:
-        max_rows = map_df.groupby(MapData.DEDUPLICATE_BY_COLUMNS).size().max()
-        derived_keep_every = np.ceil(max_rows / limit_rows_per_group)
-    elif limit_rows_per_metric is not None:
-        group_sizes = map_df.groupby(MapData.DEDUPLICATE_BY_COLUMNS).size().to_numpy()
-        # search for the `keep_every` such that when you apply it to each group,
-        # the total number of rows is smaller than `limit_rows_per_metric`.
-        for k in range(1, group_sizes.max() + 1):
-            if (np.ceil(group_sizes / k)).sum() <= limit_rows_per_metric:
-                derived_keep_every = k
-                break
-        # if no such `k` is found, then `derived_keep_every` stays as 1.
+
+    grouped_map_df = map_df.groupby(MapData.DEDUPLICATE_BY_COLUMNS)
+
+    derived_keep_every = _subsample_rate(
+        map_df, keep_every, limit_rows_per_group, limit_rows_per_metric
+    )
 
     if derived_keep_every <= 1:
         filtered_map_df = map_df
     else:
         filtered_dfs = []
-        for _, df_g in map_df.groupby(MapData.DEDUPLICATE_BY_COLUMNS):
+        for _, df_g in grouped_map_df:
             df_g = df_g.sort_values(map_key)
             if include_first_last:
-                rows_per_group = int(np.ceil(len(df_g) / derived_keep_every))
+                rows_per_group = _ceil_divide(len(df_g), derived_keep_every)
                 linspace_idcs = np.linspace(0, len(df_g) - 1, rows_per_group)
                 idcs = np.round(linspace_idcs).astype(int)
                 filtered_df = df_g.iloc[idcs]

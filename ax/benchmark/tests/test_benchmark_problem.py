@@ -5,25 +5,28 @@
 
 # pyre-strict
 
-import math
-from typing import Optional, Union
-
-import torch
+from itertools import product
 
 from ax.benchmark.benchmark_metric import BenchmarkMetric
 
-from ax.benchmark.benchmark_problem import create_problem_from_botorch
-from ax.benchmark.runners.botorch_test import BotorchTestProblemRunner
-from ax.core.arm import Arm
-from ax.core.objective import MultiObjective
-from ax.core.optimization_config import MultiObjectiveOptimizationConfig
-from ax.core.parameter import ChoiceParameter, ParameterType, RangeParameter
+from ax.benchmark.benchmark_problem import (
+    BenchmarkProblem,
+    create_problem_from_botorch,
+    get_moo_opt_config,
+    get_soo_opt_config,
+)
+from ax.benchmark.benchmark_test_functions.botorch_test import BoTorchTestFunction
+from ax.core.objective import MultiObjective, Objective
+from ax.core.optimization_config import (
+    MultiObjectiveOptimizationConfig,
+    OptimizationConfig,
+)
+from ax.core.outcome_constraint import OutcomeConstraint
 from ax.core.search_space import SearchSpace
 from ax.core.types import ComparisonOp
+from ax.exceptions.core import UserInputError
 from ax.utils.common.testutils import TestCase
-from ax.utils.common.typeutils import checked_cast
 from botorch.test_functions.base import ConstrainedBaseTestProblem
-from botorch.test_functions.multi_fidelity import AugmentedBranin
 from botorch.test_functions.multi_objective import BraninCurrin, ConstrainedBraninCurrin
 from botorch.test_functions.synthetic import (
     Ackley,
@@ -32,7 +35,6 @@ from botorch.test_functions.synthetic import (
     ConstrainedHartmann,
     Cosine8,
 )
-from hypothesis import given, strategies as st
 from pyre_extensions import assert_is_instance
 
 
@@ -42,61 +44,96 @@ class TestBenchmarkProblem(TestCase):
         self.maxDiff = None
         super().setUp()
 
-    def _test_multi_fidelity_or_multi_task(self, fidelity_or_task: str) -> None:
-        """
-        Args:
-            fidelity_or_task: "fidelity" or "task"
-        """
-        parameters = [
-            RangeParameter(
-                name=f"x{i}",
-                parameter_type=ParameterType.FLOAT,
-                lower=0.0,
-                upper=1.0,
-            )
-            for i in range(2)
-        ] + [
-            ChoiceParameter(
-                name="x2",
-                parameter_type=ParameterType.FLOAT,
-                values=[0, 1],
-                is_fidelity=fidelity_or_task == "fidelity",
-                is_task=fidelity_or_task == "task",
-                target_value=1,
-            )
+    def test_inference_value_not_implemented(self) -> None:
+        objectives = [
+            Objective(metric=BenchmarkMetric(name, lower_is_better=True))
+            for name in ["Branin", "Currin"]
         ]
-        problem = create_problem_from_botorch(
-            test_problem_class=AugmentedBranin,
-            test_problem_kwargs={},
-            # pyre-fixme: Incompatible parameter type [6]: In call
-            # `SearchSpace.__init__`, for 1st positional argument, expected
-            # `List[Parameter]` but got `List[RangeParameter]`.
-            search_space=SearchSpace(parameters),
-            num_trials=3,
+        optimization_config = OptimizationConfig(objective=objectives[0])
+        test_function = BoTorchTestFunction(
+            botorch_problem=Branin(), outcome_names=["Branin"]
         )
-        arm = Arm(parameters={"x0": 1.0, "x1": 0.0, "x2": 0.0})
-        at_target = assert_is_instance(
-            Branin()
-            .evaluate_true(torch.tensor([1.0, 0.0], dtype=torch.double).unsqueeze(0))
-            .item(),
-            float,
-        )
-        self.assertAlmostEqual(
-            problem.runner.evaluate_oracle(arm=arm).item(), at_target
-        )
-        # first term: (-(b - 0.1) * (1 - x3)  + c - r)^2
-        # low-fidelity: (-b - 0.1 + c - r)^2
-        # high-fidelity: (-b + c - r)^2
-        t = -5.1 / (4 * math.pi**2) + 5 / math.pi - 6
-        expected_change = (t + 0.1) ** 2 - t**2
-        self.assertAlmostEqual(
-            problem.runner.get_Y_true(arm=arm).item(),
-            at_target + expected_change,
-        )
+        with self.assertRaisesRegex(NotImplementedError, "Only `n_best_points=1`"):
+            BenchmarkProblem(
+                name="foo",
+                optimization_config=optimization_config,
+                num_trials=1,
+                optimal_value=0.0,
+                baseline_value=1.0,
+                search_space=SearchSpace(parameters=[]),
+                test_function=test_function,
+                n_best_points=2,
+            )
 
-    def test_multi_fidelity_or_multi_task(self) -> None:
-        self._test_multi_fidelity_or_multi_task(fidelity_or_task="fidelity")
-        self._test_multi_fidelity_or_multi_task(fidelity_or_task="task")
+        with self.assertRaisesRegex(
+            NotImplementedError, "Inference trace is not supported for MOO"
+        ):
+            BenchmarkProblem(
+                name="foo",
+                optimization_config=MultiObjectiveOptimizationConfig(
+                    objective=MultiObjective(objectives)
+                ),
+                num_trials=1,
+                optimal_value=0.0,
+                search_space=SearchSpace(parameters=[]),
+                baseline_value=1.0,
+                test_function=test_function,
+                n_best_points=1,
+                report_inference_value_as_trace=True,
+            )
+
+    def test_mismatch_of_names_on_test_function_and_opt_config_raises(self) -> None:
+        objectives = [
+            Objective(metric=BenchmarkMetric(name, lower_is_better=True))
+            for name in ["Branin", "Currin"]
+        ]
+        test_function = BoTorchTestFunction(
+            botorch_problem=Branin(), outcome_names=["Branin"]
+        )
+        opt_config = MultiObjectiveOptimizationConfig(
+            objective=MultiObjective(objectives)
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "The following objectives are defined on "
+            "`optimization_config` but not included in "
+            "`runner.test_function.outcome_names`: {'Currin'}.",
+        ):
+            BenchmarkProblem(
+                name="foo",
+                optimization_config=opt_config,
+                num_trials=1,
+                optimal_value=1.0,
+                search_space=SearchSpace(parameters=[]),
+                test_function=test_function,
+                baseline_value=0.0,
+            )
+
+        opt_config = OptimizationConfig(
+            objective=objectives[0],
+            outcome_constraints=[
+                OutcomeConstraint(
+                    BenchmarkMetric("c", lower_is_better=False),
+                    ComparisonOp.LEQ,
+                    0.0,
+                )
+            ],
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "The following constraints are defined on "
+            "`optimization_config` but not included in "
+            "`runner.test_function.outcome_names`: {'c'}.",
+        ):
+            BenchmarkProblem(
+                name="foo",
+                optimization_config=opt_config,
+                num_trials=1,
+                optimal_value=0.0,
+                search_space=SearchSpace(parameters=[]),
+                test_function=test_function,
+                baseline_value=1.0,
+            )
 
     def test_single_objective_from_botorch(self) -> None:
         for botorch_test_problem in [Ackley(), ConstrainedHartmann(dim=6)]:
@@ -104,6 +141,7 @@ class TestBenchmarkProblem(TestCase):
                 test_problem_class=botorch_test_problem.__class__,
                 test_problem_kwargs={},
                 num_trials=1,
+                baseline_value=100.0,
             )
 
             # Test search space
@@ -136,24 +174,13 @@ class TestBenchmarkProblem(TestCase):
                 test_problem.optimal_value, botorch_test_problem._optimal_value
             )
             # test optimization config
-            self.assertEqual(
-                test_problem.optimization_config.objective.metric.name,
-                test_problem.name,
-            )
+            metric_name = test_problem.optimization_config.objective.metric.name
+            self.assertEqual(metric_name, test_problem.name)
             self.assertTrue(test_problem.optimization_config.objective.minimize)
             # test repr method
             if isinstance(botorch_test_problem, Ackley):
                 self.assertEqual(
                     test_problem.optimization_config.outcome_constraints, []
-                )
-                expected_repr = (
-                    "BenchmarkProblem(name='Ackley', "
-                    "optimization_config=OptimizationConfig(objective=Objective("
-                    'metric_name="Ackley", '
-                    "minimize=True), outcome_constraints=[]), "
-                    "num_trials=1, "
-                    "observe_noise_stds=False, "
-                    "optimal_value=0.0)"
                 )
             else:
                 outcome_constraint = (
@@ -163,41 +190,26 @@ class TestBenchmarkProblem(TestCase):
                 self.assertEqual(outcome_constraint.op, ComparisonOp.GEQ)
                 self.assertFalse(outcome_constraint.relative)
                 self.assertEqual(outcome_constraint.bound, 0.0)
-                expected_repr = (
-                    "BenchmarkProblem(name='ConstrainedHartmann', "
-                    "optimization_config=OptimizationConfig(objective=Objective("
-                    'metric_name="ConstrainedHartmann", minimize=True), '
-                    "outcome_constraints=[OutcomeConstraint(constraint_slack_0"
-                    " >= 0.0)]), "
-                    "num_trials=1, "
-                    "observe_noise_stds=False, "
-                    "optimal_value=-3.32237)"
-                )
-
-            self.assertEqual(repr(test_problem), expected_repr)
 
     def _test_constrained_from_botorch(
         self,
         observe_noise_sd: bool,
-        objective_noise_std: Optional[float],
-        constraint_noise_std: Optional[Union[float, list[float]]],
+        noise_std: float | list[float],
         test_problem_class: type[ConstrainedBaseTestProblem],
     ) -> None:
         ax_problem = create_problem_from_botorch(
             test_problem_class=test_problem_class,
-            test_problem_kwargs={
-                "noise_std": objective_noise_std,
-                "constraint_noise_std": constraint_noise_std,
-            },
+            test_problem_kwargs={},
             lower_is_better=True,
             num_trials=1,
             observe_noise_sd=observe_noise_sd,
+            noise_std=noise_std,
         )
-        runner = checked_cast(BotorchTestProblemRunner, ax_problem.runner)
-        self.assertTrue(runner._is_constrained)
-        botorch_problem = checked_cast(ConstrainedBaseTestProblem, runner.test_problem)
-        self.assertEqual(botorch_problem.noise_std, objective_noise_std)
-        self.assertEqual(botorch_problem.constraint_noise_std, constraint_noise_std)
+        test_problem = assert_is_instance(ax_problem.test_function, BoTorchTestFunction)
+        botorch_problem = assert_is_instance(
+            test_problem.botorch_problem, ConstrainedBaseTestProblem
+        )
+        self.assertEqual(ax_problem.noise_std, noise_std)
         opt_config = ax_problem.optimization_config
         outcome_constraints = opt_config.outcome_constraints
         self.assertEqual(
@@ -212,43 +224,33 @@ class TestBenchmarkProblem(TestCase):
         )
 
         self.assertEqual(
-            checked_cast(BenchmarkMetric, metric).observe_noise_sd,
+            assert_is_instance(metric, BenchmarkMetric).observe_noise_sd,
             observe_noise_sd,
         )
 
         # TODO: Support observing noise variance only for some outputs
         for constraint in outcome_constraints:
             self.assertEqual(
-                checked_cast(BenchmarkMetric, constraint.metric).observe_noise_sd,
+                assert_is_instance(constraint.metric, BenchmarkMetric).observe_noise_sd,
                 observe_noise_sd,
             )
 
-    # pyre-fixme[56]: Invalid decoration. Pyre was not able to infer the type of
-    # argument `hypothesis.strategies.booleans()` to decorator factory
-    # `hypothesis.given`.
-    @given(
-        st.booleans(),
-        st.one_of(st.none(), st.just(0.1)),
-        st.one_of(st.none(), st.just(0.2), st.just([0.3, 0.4])),
-    )
-    def test_constrained_soo_from_botorch(
-        self,
-        observe_noise_sd: bool,
-        objective_noise_std: Optional[float],
-        constraint_noise_std: Optional[Union[float, list[float]]],
-    ) -> None:
-        self._test_constrained_from_botorch(
-            observe_noise_sd=observe_noise_sd,
-            objective_noise_std=objective_noise_std,
-            constraint_noise_std=constraint_noise_std,
-            test_problem_class=ConstrainedGramacy,
-        )
+    def test_constrained_soo_from_botorch(self) -> None:
+        for observe_noise_sd, noise_std in product(
+            [False, True],
+            [0.0, 0.1, [0.1, 0.3, 0.4]],
+        ):
+            with self.subTest(observe_noise_sd=observe_noise_sd, noise_std=noise_std):
+                self._test_constrained_from_botorch(
+                    observe_noise_sd=observe_noise_sd,
+                    noise_std=noise_std,
+                    test_problem_class=ConstrainedGramacy,
+                )
 
     def test_constrained_moo_from_botorch(self) -> None:
         self._test_constrained_from_botorch(
             observe_noise_sd=False,
-            objective_noise_std=None,
-            constraint_noise_std=None,
+            noise_std=0.0,
             test_problem_class=ConstrainedBraninCurrin,
         )
 
@@ -319,5 +321,69 @@ class TestBenchmarkProblem(TestCase):
             lower_is_better=False,
             num_trials=1,
             test_problem_kwargs={},
+            baseline_value=-8,
         )
         self.assertFalse(test_problem.optimization_config.objective.minimize)
+
+    def test_sq_out_of_search_space(self) -> None:
+        with self.assertRaisesRegex(
+            UserInputError, "Status quo parameters are not in the search space."
+        ):
+            create_problem_from_botorch(
+                test_problem_class=Branin,
+                lower_is_better=True,
+                num_trials=1,
+                test_problem_kwargs={},
+                status_quo_params={"x0": 20.0, "x1": 20.0},
+            )
+
+    def test_get_soo_opt_config(self) -> None:
+        opt_config = get_soo_opt_config(
+            outcome_names=["foo", "bar"],
+            lower_is_better=False,
+            observe_noise_sd=True,
+        )
+        self.assertIsInstance(opt_config.objective, Objective)
+        self.assertEqual(len(opt_config.outcome_constraints), 1)
+        objective_metric = assert_is_instance(
+            opt_config.objective.metric, BenchmarkMetric
+        )
+        self.assertEqual(objective_metric.name, "foo")
+        self.assertEqual(objective_metric.observe_noise_sd, True)
+        self.assertEqual(objective_metric.lower_is_better, False)
+        constraint_metric = assert_is_instance(
+            opt_config.outcome_constraints[0].metric, BenchmarkMetric
+        )
+        self.assertEqual(constraint_metric.name, "bar")
+        self.assertEqual(constraint_metric.observe_noise_sd, True)
+        self.assertEqual(constraint_metric.lower_is_better, False)
+
+    def test_get_moo_opt_config(self) -> None:
+        opt_config = get_moo_opt_config(
+            outcome_names=["foo", "bar", "baz", "pony"],
+            ref_point=[3.0, 4.0],
+            lower_is_better=False,
+            observe_noise_sd=True,
+            num_constraints=2,
+        )
+        self.assertEqual(len(opt_config.objective.metrics), 2)
+        self.assertEqual(len(opt_config.outcome_constraints), 2)
+        self.assertEqual(opt_config.objective_thresholds[0].bound, 3.0)
+        objective_metrics = [
+            assert_is_instance(metric, BenchmarkMetric)
+            for metric in opt_config.objective.metrics
+        ]
+        self.assertEqual(len(objective_metrics), 2)
+        self.assertEqual(objective_metrics[0].name, "foo")
+        self.assertEqual(objective_metrics[0].observe_noise_sd, True)
+        self.assertEqual(objective_metrics[0].lower_is_better, False)
+        self.assertEqual(objective_metrics[1].name, "bar")
+        # Check constraints
+        self.assertEqual(len(opt_config.outcome_constraints), 2)
+        constraint_metrics = [
+            assert_is_instance(constraint.metric, BenchmarkMetric)
+            for constraint in opt_config.outcome_constraints
+        ]
+        self.assertEqual(constraint_metrics[0].name, "baz")
+        self.assertEqual(constraint_metrics[0].observe_noise_sd, True)
+        self.assertEqual(constraint_metrics[0].lower_is_better, False)

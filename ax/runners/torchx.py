@@ -7,16 +7,16 @@
 # pyre-strict
 
 import inspect
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 
 from logging import Logger
-from typing import Any, Callable, Optional
+from typing import Any
 
 from ax.core import Trial
 from ax.core.base_trial import BaseTrial, TrialStatus
 from ax.core.runner import Runner
 from ax.utils.common.logger import get_logger
-from ax.utils.common.typeutils import not_none
+from pyre_extensions import none_throws
 
 logger: Logger = get_logger(__name__)
 
@@ -117,13 +117,13 @@ try:
             self,
             tracker_base: str,
             component: Callable[..., AppDef],
-            component_const_params: Optional[dict[str, Any]] = None,
+            component_const_params: dict[str, Any] | None = None,
             scheduler: str = "local",
-            cfg: Optional[Mapping[str, CfgVal]] = None,
+            cfg: Mapping[str, CfgVal] | None = None,
         ) -> None:
             self._component: Callable[..., AppDef] = component
             self._scheduler: str = scheduler
-            self._cfg: Optional[Mapping[str, CfgVal]] = cfg
+            self._cfg: Mapping[str, CfgVal] | None = cfg
             # need to use the same runner in case it has state
             # e.g. torchx's local_scheduler has state hence need to poll status
             # on the same scheduler instance
@@ -145,7 +145,7 @@ try:
                 )
 
             parameters = dict(self._component_const_params)
-            parameters.update(not_none(trial.arm).parameters)
+            parameters.update(none_throws(trial.arm).parameters)
             component_args = inspect.getfullargspec(self._component).args
             if "trial_idx" in component_args:
                 parameters["trial_idx"] = trial.index
@@ -180,9 +180,7 @@ try:
 
             return trial_statuses
 
-        def stop(
-            self, trial: BaseTrial, reason: Optional[str] = None
-        ) -> dict[str, Any]:
+        def stop(self, trial: BaseTrial, reason: str | None = None) -> dict[str, Any]:
             """Kill the given trial."""
             app_handle: str = trial.run_metadata[TORCHX_APP_HANDLE]
             self._torchx_runner.stop(app_handle)

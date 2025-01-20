@@ -12,9 +12,10 @@ from collections.abc import Iterable, Mapping
 
 from logging import Logger
 
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
+import numpy.typing as npt
 import pandas as pd
 from ax.core.base_trial import BaseTrial
 from ax.core.map_data import MapData, MapKeyInfo
@@ -38,7 +39,7 @@ class NoisyFunctionMapMetric(MapMetric):
         name: str,
         param_names: Iterable[str],
         noise_sd: float = 0.0,
-        lower_is_better: Optional[bool] = None,
+        lower_is_better: bool | None = None,
         cache_evaluations: bool = True,
     ) -> None:
         """
@@ -112,6 +113,6 @@ class NoisyFunctionMapMetric(MapMetric):
                 MetricFetchE(message=f"Failed to fetch {self.name}", exception=e)
             )
 
-    def f(self, x: np.ndarray) -> Mapping[str, Any]:
+    def f(self, x: npt.NDArray) -> Mapping[str, Any]:
         """The deterministic function that produces the metric outcomes."""
         raise NotImplementedError

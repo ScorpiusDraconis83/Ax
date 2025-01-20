@@ -18,22 +18,11 @@ References
     35, 2022.
 """
 
-from typing import Optional, Union
-
-from ax.benchmark.benchmark_metric import BenchmarkMetric
-
-from ax.benchmark.benchmark_problem import BenchmarkProblem
-from ax.benchmark.runners.botorch_test import BotorchTestProblemRunner
-from ax.core.objective import Objective
-from ax.core.optimization_config import OptimizationConfig
+from ax.benchmark.benchmark_problem import BenchmarkProblem, get_soo_opt_config
+from ax.benchmark.benchmark_test_functions.botorch_test import BoTorchTestFunction
 from ax.core.parameter import ParameterType, RangeParameter
 from ax.core.search_space import SearchSpace
-from botorch.test_functions.synthetic import (
-    Ackley,
-    Hartmann,
-    Rosenbrock,
-    SyntheticTestFunction,
-)
+from botorch.test_functions.synthetic import Ackley, Hartmann, Rosenbrock
 
 
 def _get_problem_from_common_inputs(
@@ -43,17 +32,18 @@ def _get_problem_from_common_inputs(
     metric_name: str,
     lower_is_better: bool,
     observe_noise_sd: bool,
-    test_problem_class: type[SyntheticTestFunction],
+    test_problem_class: type[Hartmann | Ackley | Rosenbrock],
     benchmark_name: str,
     num_trials: int,
     optimal_value: float,
-    test_problem_bounds: Optional[list[tuple[float, float]]] = None,
+    baseline_value: float,
+    test_problem_bounds: list[tuple[float, float]] | None = None,
 ) -> BenchmarkProblem:
     """This is a helper that deduplicates common bits of the below problems.
 
     Args:
         bounds: The parameter bounds. These will be passed to
-            `BotorchTestProblemRunner` as `modified_bounds`, and the parameters
+            `BotorchTestFunction` as `modified_bounds`, and the parameters
             will be renormalized from these bounds to the bounds of the original
             problem. For example, if `bounds` are [(0, 3)] and the test
             problem's original bounds are [(0, 2)], then the original problem
@@ -73,6 +63,7 @@ def _get_problem_from_common_inputs(
             attaining scores of over 100%. One strategy for choosing this value
             is to choose the overall optimum of the problem without regard to
             the integer restrictions.
+        baseline_value: Will be passed to the `BenchmarkProblem`.
         test_problem_bounds: Optional bounds to evaluate the base test problem on.
             These are passed in as `bounds` while initializing the test problem.
 
@@ -93,40 +84,36 @@ def _get_problem_from_common_inputs(
             for i in range(dim)
         ]
     )
-    optimization_config = OptimizationConfig(
-        objective=Objective(
-            metric=BenchmarkMetric(
-                name=metric_name,
-                lower_is_better=lower_is_better,
-                observe_noise_sd=observe_noise_sd,
-            ),
-            minimize=lower_is_better,
-        )
-    )
-    test_problem_kwargs: dict[str, Union[int, list[tuple[float, float]]]] = {"dim": dim}
-    if test_problem_bounds is not None:
-        test_problem_kwargs["bounds"] = test_problem_bounds
-    runner = BotorchTestProblemRunner(
-        test_problem_class=test_problem_class,
-        test_problem_kwargs=test_problem_kwargs,
+    optimization_config = get_soo_opt_config(
         outcome_names=[metric_name],
+        lower_is_better=lower_is_better,
+        observe_noise_sd=observe_noise_sd,
+    )
+
+    if test_problem_bounds is None:
+        test_problem = test_problem_class(dim=dim)
+    else:
+        test_problem = test_problem_class(dim=dim, bounds=test_problem_bounds)
+    test_function = BoTorchTestFunction(
+        botorch_problem=test_problem,
         modified_bounds=bounds,
+        outcome_names=[metric_name],
     )
     return BenchmarkProblem(
         name=benchmark_name + ("_observed_noise" if observe_noise_sd else ""),
         search_space=search_space,
         optimization_config=optimization_config,
-        runner=runner,
+        test_function=test_function,
         num_trials=num_trials,
         optimal_value=optimal_value,
-        observe_noise_stds=observe_noise_sd,
+        baseline_value=baseline_value,
     )
 
 
 def get_discrete_hartmann(
     num_trials: int = 50,
     observe_noise_sd: bool = False,
-    bounds: Optional[list[tuple[float, float]]] = None,
+    bounds: list[tuple[float, float]] | None = None,
 ) -> BenchmarkProblem:
     """6D Hartmann problem where first 4 dimensions are discretized."""
     dim_int = 4
@@ -152,13 +139,15 @@ def get_discrete_hartmann(
         # optimum without regards to the integer constraints is -3.3224, but
         # that won't be attainable here.
         optimal_value=-3.0,
+        # Baseline values were obtained with `compute_baseline_value_from_sobol`
+        baseline_value=-0.6755184773211834,
     )
 
 
 def get_discrete_ackley(
     num_trials: int = 50,
     observe_noise_sd: bool = False,
-    bounds: Optional[list[tuple[float, float]]] = None,
+    bounds: list[tuple[float, float]] | None = None,
 ) -> BenchmarkProblem:
     """13D Ackley problem where first 10 dimensions are discretized.
 
@@ -185,13 +174,14 @@ def get_discrete_ackley(
         # Ackley's lowest value is at (0, 0, ..., 0), which is in the search
         # space, so the restriction to integers doesn't change the optimum
         optimal_value=0.0,
+        baseline_value=3.1869268815137968,
     )
 
 
 def get_discrete_rosenbrock(
     num_trials: int = 50,
     observe_noise_sd: bool = False,
-    bounds: Optional[list[tuple[float, float]]] = None,
+    bounds: list[tuple[float, float]] | None = None,
 ) -> BenchmarkProblem:
     """10D Rosenbrock problem where first 6 dimensions are discretized."""
     dim_int = 6
@@ -212,4 +202,5 @@ def get_discrete_rosenbrock(
         # Rosenbrock's lowest value is at (1, 1, ..., 1), which is in the search
         # space, so the restriction to integers doesn't change the optimum
         optimal_value=0.0,
+        baseline_value=705714.2851460224,
     )

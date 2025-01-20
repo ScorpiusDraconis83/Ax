@@ -13,7 +13,7 @@ import logging
 from collections.abc import Iterable
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional, TYPE_CHECKING, Union
+from typing import Any, TYPE_CHECKING, TypeVar
 
 import torch
 from ax.core.arm import Arm
@@ -37,11 +37,11 @@ from ax.storage.botorch_modular_registry import (
 from ax.storage.transform_registry import REVERSE_TRANSFORM_REGISTRY
 from ax.utils.common.kwargs import warn_on_kwargs
 from ax.utils.common.logger import get_logger
-from ax.utils.common.typeutils import checked_cast
 from ax.utils.common.typeutils_torch import torch_type_from_str
 from botorch.models.transforms.input import ChainedInputTransform, InputTransform
 from botorch.models.transforms.outcome import ChainedOutcomeTransform, OutcomeTransform
 from botorch.utils.types import _DefaultType, DEFAULT
+from pyre_extensions import assert_is_instance
 from torch.distributions.transformed_distribution import TransformedDistribution
 
 logger: logging.Logger = get_logger(__name__)
@@ -51,33 +51,35 @@ if TYPE_CHECKING:
     # import as module to make sphinx-autodoc-typehints happy
     from ax import core  # noqa F401
 
+T = TypeVar("T")
+
 
 def batch_trial_from_json(
     experiment: core.experiment.Experiment,
     index: int,
-    trial_type: Optional[str],
+    trial_type: str | None,
     status: TrialStatus,
     time_created: datetime,
-    time_completed: Optional[datetime],
-    time_staged: Optional[datetime],
-    time_run_started: Optional[datetime],
-    abandoned_reason: Optional[str],
-    run_metadata: Optional[dict[str, Any]],
+    time_completed: datetime | None,
+    time_staged: datetime | None,
+    time_run_started: datetime | None,
+    abandoned_reason: str | None,
+    run_metadata: dict[str, Any] | None,
     generator_run_structs: list[GeneratorRunStruct],
-    runner: Optional[Runner],
+    runner: Runner | None,
     abandoned_arms_metadata: dict[str, AbandonedArm],
     num_arms_created: int,
-    status_quo: Optional[Arm],
+    status_quo: Arm | None,
     status_quo_weight_override: float,
-    optimize_for_power: Optional[bool],
+    optimize_for_power: bool | None,
     # Allowing default values for backwards compatibility with
     # objects stored before these fields were added.
-    failed_reason: Optional[str] = None,
-    ttl_seconds: Optional[int] = None,
-    generation_step_index: Optional[int] = None,
-    properties: Optional[dict[str, Any]] = None,
-    stop_metadata: Optional[dict[str, Any]] = None,
-    lifecycle_stage: Optional[LifecycleStage] = None,
+    failed_reason: str | None = None,
+    ttl_seconds: int | None = None,
+    generation_step_index: int | None = None,
+    properties: dict[str, Any] | None = None,
+    stop_metadata: dict[str, Any] | None = None,
+    lifecycle_stage: LifecycleStage | None = None,
     **kwargs: Any,
 ) -> BatchTrial:
     """Load Ax BatchTrial from JSON.
@@ -117,24 +119,24 @@ def batch_trial_from_json(
 def trial_from_json(
     experiment: core.experiment.Experiment,
     index: int,
-    trial_type: Optional[str],
+    trial_type: str | None,
     status: TrialStatus,
     time_created: datetime,
-    time_completed: Optional[datetime],
-    time_staged: Optional[datetime],
-    time_run_started: Optional[datetime],
-    abandoned_reason: Optional[str],
-    run_metadata: Optional[dict[str, Any]],
+    time_completed: datetime | None,
+    time_staged: datetime | None,
+    time_run_started: datetime | None,
+    abandoned_reason: str | None,
+    run_metadata: dict[str, Any] | None,
     generator_run: GeneratorRun,
-    runner: Optional[Runner],
+    runner: Runner | None,
     num_arms_created: int,
     # Allowing default values for backwards compatibility with
     # objects stored before these fields were added.
-    failed_reason: Optional[str] = None,
-    ttl_seconds: Optional[int] = None,
-    generation_step_index: Optional[int] = None,
-    properties: Optional[dict[str, Any]] = None,
-    stop_metadata: Optional[dict[str, Any]] = None,
+    failed_reason: str | None = None,
+    ttl_seconds: int | None = None,
+    generation_step_index: int | None = None,
+    properties: dict[str, Any] | None = None,
+    stop_metadata: dict[str, Any] | None = None,
     **kwargs: Any,
 ) -> Trial:
     """Load Ax trial from JSON.
@@ -184,7 +186,7 @@ def input_transform_type_from_json(object_json: dict[str, Any]) -> type[InputTra
 
 
 def outcome_transform_type_from_json(
-    object_json: dict[str, Any]
+    object_json: dict[str, Any],
 ) -> type[OutcomeTransform]:
     outcome_transform_type = object_json.pop("index")
     if outcome_transform_type not in REVERSE_OUTCOME_TRANSFORM_REGISTRY:
@@ -215,22 +217,22 @@ def class_from_json(json: dict[str, Any]) -> type[Any]:
 def tensor_from_json(json: dict[str, Any]) -> torch.Tensor:
     try:
         device = (
-            checked_cast(
-                torch.device,
+            assert_is_instance(
                 torch_type_from_str(
                     identifier=json["device"]["value"], type_name="device"
                 ),
+                torch.device,
             )
             if torch.cuda.is_available()
             else torch.device("cpu")
         )
         return torch.tensor(
             json["value"],
-            dtype=checked_cast(
-                torch.dtype,
+            dtype=assert_is_instance(
                 torch_type_from_str(
                     identifier=json["dtype"]["value"], type_name="dtype"
                 ),
+                torch.dtype,
             ),
             device=device,
         )
@@ -241,13 +243,13 @@ def tensor_from_json(json: dict[str, Any]) -> torch.Tensor:
         )
 
 
-def tensor_or_size_from_json(json: dict[str, Any]) -> Union[torch.Tensor, torch.Size]:
+def tensor_or_size_from_json(json: dict[str, Any]) -> torch.Tensor | torch.Size:
     if json["__type"] == "Tensor":
         return tensor_from_json(json)
     elif json["__type"] == "torch_Size":
-        return checked_cast(
-            torch.Size,
+        return assert_is_instance(
             torch_type_from_str(identifier=json["value"], type_name="Size"),
+            torch.Size,
         )
     else:
         raise JSONDecodeError(
@@ -255,9 +257,7 @@ def tensor_or_size_from_json(json: dict[str, Any]) -> Union[torch.Tensor, torch.
         )
 
 
-# pyre-fixme[3]: Return annotation cannot contain `Any`.
-# pyre-fixme[2]: Parameter annotation cannot be `Any`.
-def botorch_component_from_json(botorch_class: Any, json: dict[str, Any]) -> type[Any]:
+def botorch_component_from_json(botorch_class: type[T], json: dict[str, Any]) -> T:
     """Load any instance of `torch.nn.Module` or descendants registered in
     `CLASS_DECODER_REGISTRY` from state dict."""
     state_dict = json.pop("state_dict")
@@ -322,7 +322,7 @@ def botorch_component_from_json(botorch_class: Any, json: dict[str, Any]) -> typ
     )
 
 
-def pathlib_from_json(pathsegments: Union[str, Iterable[str]]) -> Path:
+def pathlib_from_json(pathsegments: str | Iterable[str]) -> Path:
     if isinstance(pathsegments, str):
         return Path(pathsegments)
 

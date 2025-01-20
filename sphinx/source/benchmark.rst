@@ -34,7 +34,6 @@ Benchmark Problem
     :undoc-members:
     :show-inheritance:
 
-
 Benchmark Result
 ~~~~~~~~~~~~~~~~
 
@@ -47,6 +46,38 @@ Benchmark
 ~~~~~~~~~
 
 .. automodule:: ax.benchmark.benchmark
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
+Benchmark Runner
+~~~~~~~~~~~~~~~~
+
+.. automodule:: ax.benchmark.benchmark_runner
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
+Benchmark Test Function
+~~~~~~~~~~~~~~~~~~~~~~~
+
+.. automodule:: ax.benchmark.benchmark_test_function
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
+Benchmark Step Runtime Function
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. automodule:: ax.benchmark.benchmark_step_runtime_function
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
+Benchmark Trial Metadata
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. automodule:: ax.benchmark.benchmark_trial_metadata
     :members:
     :undoc-members:
     :show-inheritance:
@@ -75,18 +106,18 @@ Benchmark Problems Registry
     :undoc-members:
     :show-inheritance:
 
-Benchmark Problems High Dimensional Embedding
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Benchmark Problems: Bandit
+~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. automodule:: ax.benchmark.problems.hd_embedding
+.. automodule:: ax.benchmark.problems.synthetic.bandit
     :members:
     :undoc-members:
     :show-inheritance:
 
-Benchmark Problems Surrogate
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Benchmark Problems High Dimensional Embedding
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. automodule:: ax.benchmark.problems.surrogate
+.. automodule:: ax.benchmark.problems.hd_embedding
     :members:
     :undoc-members:
     :show-inheritance:
@@ -123,26 +154,35 @@ Benchmark Problems PyTorchCNN TorchVision
     :undoc-members:
     :show-inheritance:
 
-Benchmark Runners Base
-~~~~~~~~~~~~~~~~~~~~~~
 
-.. automodule:: ax.benchmark.runners.base
+Benchmark Problems Runtime Functions
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. automodule:: ax.benchmark.problems.runtime_funcs
     :members:
     :undoc-members:
     :show-inheritance:
 
-Benchmark Runners BoTorch Test
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Benchmark Test Functions: BoTorch Test
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. automodule:: ax.benchmark.runners.botorch_test
+.. automodule:: ax.benchmark.benchmark_test_functions.botorch_test
     :members:
     :undoc-members:
     :show-inheritance:
 
-Benchmark Runners Surrogate
-~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Benchmark Test Functions: Surrogate
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. automodule:: ax.benchmark.runners.surrogate
+.. automodule:: ax.benchmark.benchmark_test_functions.surrogate
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
+Benchmark Test Functions: Synthetic
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. automodule:: ax.benchmark.benchmark_test_functions.synthetic
     :members:
     :undoc-members:
     :show-inheritance:

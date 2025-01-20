@@ -27,18 +27,19 @@ References
 
 from __future__ import annotations
 
-from typing import Callable, cast, Optional, Union
+from collections.abc import Callable
+
+from typing import cast, Optional, Union
 
 import torch
 from ax.exceptions.core import AxError
-from ax.models.torch.botorch_defaults import NO_FEASIBLE_POINTS_MESSAGE
+from ax.models.torch.botorch_defaults import NO_OBSERVED_POINTS_MESSAGE
 from ax.models.torch.utils import (
     _get_X_pending_and_observed,
     get_outcome_constraint_transforms,
     subset_model,
 )
 from ax.models.torch_base import TorchModel
-from ax.utils.common.typeutils import checked_cast, not_none
 from botorch.acquisition import get_acquisition_function
 from botorch.acquisition.acquisition import AcquisitionFunction
 from botorch.acquisition.multi_objective.logei import (
@@ -58,6 +59,7 @@ from botorch.posteriors.posterior import Posterior
 from botorch.posteriors.posterior_list import PosteriorList
 from botorch.utils.multi_objective.hypervolume import infer_reference_point
 from botorch.utils.multi_objective.pareto import is_non_dominated
+from pyre_extensions import assert_is_instance, none_throws
 from torch import Tensor
 
 DEFAULT_EHVI_MC_SAMPLES = 128
@@ -78,6 +80,12 @@ TFrontierEvaluator = Callable[
     ],
     tuple[Tensor, Tensor, Tensor],
 ]
+
+NO_FEASIBLE_POINTS_MESSAGE = (
+    " Cannot infer objective thresholds due to no observed feasible points. "
+    " This likely means that one or more outcome constraints is set too strictly.  "
+    " Consider adding thresholds to your objectives to bypass this error."
+)
 
 
 def get_weighted_mc_objective_and_objective_thresholds(
@@ -113,16 +121,16 @@ def get_NEHVI(
     model: Model,
     objective_weights: Tensor,
     objective_thresholds: Tensor,
-    outcome_constraints: Optional[tuple[Tensor, Tensor]] = None,
-    X_observed: Optional[Tensor] = None,
-    X_pending: Optional[Tensor] = None,
+    outcome_constraints: tuple[Tensor, Tensor] | None = None,
+    X_observed: Tensor | None = None,
+    X_pending: Tensor | None = None,
     *,
     prune_baseline: bool = True,
     mc_samples: int = DEFAULT_EHVI_MC_SAMPLES,
-    alpha: Optional[float] = None,
-    marginalize_dim: Optional[int] = None,
+    alpha: float | None = None,
+    marginalize_dim: int | None = None,
     cache_root: bool = True,
-    seed: Optional[int] = None,
+    seed: int | None = None,
 ) -> qNoisyExpectedHypervolumeImprovement:
     r"""Instantiates a qNoisyExpectedHyperVolumeImprovement acquisition function.
 
@@ -156,8 +164,7 @@ def get_NEHVI(
     Returns:
         qNoisyExpectedHyperVolumeImprovement: The instantiated acquisition function.
     """
-    return checked_cast(
-        qNoisyExpectedHypervolumeImprovement,
+    return assert_is_instance(
         _get_NEHVI(
             acqf_name="qNEHVI",
             model=model,
@@ -173,6 +180,7 @@ def get_NEHVI(
             cache_root=cache_root,
             seed=seed,
         ),
+        qNoisyExpectedHypervolumeImprovement,
     )
 
 
@@ -180,16 +188,16 @@ def get_qLogNEHVI(
     model: Model,
     objective_weights: Tensor,
     objective_thresholds: Tensor,
-    outcome_constraints: Optional[tuple[Tensor, Tensor]] = None,
-    X_observed: Optional[Tensor] = None,
-    X_pending: Optional[Tensor] = None,
+    outcome_constraints: tuple[Tensor, Tensor] | None = None,
+    X_observed: Tensor | None = None,
+    X_pending: Tensor | None = None,
     *,
     prune_baseline: bool = True,
     mc_samples: int = DEFAULT_EHVI_MC_SAMPLES,
-    alpha: Optional[float] = None,
-    marginalize_dim: Optional[int] = None,
+    alpha: float | None = None,
+    marginalize_dim: int | None = None,
     cache_root: bool = True,
-    seed: Optional[int] = None,
+    seed: int | None = None,
 ) -> qLogNoisyExpectedHypervolumeImprovement:
     r"""Instantiates a qLogNoisyExpectedHyperVolumeImprovement acquisition function.
 
@@ -223,8 +231,7 @@ def get_qLogNEHVI(
     Returns:
         qLogNoisyExpectedHyperVolumeImprovement: The instantiated acquisition function.
     """
-    return checked_cast(
-        qLogNoisyExpectedHypervolumeImprovement,
+    return assert_is_instance(
         _get_NEHVI(
             acqf_name="qLogNEHVI",
             model=model,
@@ -240,6 +247,7 @@ def get_qLogNEHVI(
             cache_root=cache_root,
             seed=seed,
         ),
+        qLogNoisyExpectedHypervolumeImprovement,
     )
 
 
@@ -248,21 +256,19 @@ def _get_NEHVI(
     model: Model,
     objective_weights: Tensor,
     objective_thresholds: Tensor,
-    outcome_constraints: Optional[tuple[Tensor, Tensor]] = None,
-    X_observed: Optional[Tensor] = None,
-    X_pending: Optional[Tensor] = None,
+    outcome_constraints: tuple[Tensor, Tensor] | None = None,
+    X_observed: Tensor | None = None,
+    X_pending: Tensor | None = None,
     *,
     prune_baseline: bool = True,
     mc_samples: int = DEFAULT_EHVI_MC_SAMPLES,
-    alpha: Optional[float] = None,
-    marginalize_dim: Optional[int] = None,
+    alpha: float | None = None,
+    marginalize_dim: int | None = None,
     cache_root: bool = True,
-    seed: Optional[int] = None,
-) -> Union[
-    qNoisyExpectedHypervolumeImprovement, qLogNoisyExpectedHypervolumeImprovement
-]:
+    seed: int | None = None,
+) -> qNoisyExpectedHypervolumeImprovement | qLogNoisyExpectedHypervolumeImprovement:
     if X_observed is None:
-        raise ValueError(NO_FEASIBLE_POINTS_MESSAGE)
+        raise ValueError(NO_OBSERVED_POINTS_MESSAGE)
     # construct Objective module
     (
         objective,
@@ -311,13 +317,13 @@ def get_EHVI(
     model: Model,
     objective_weights: Tensor,
     objective_thresholds: Tensor,
-    outcome_constraints: Optional[tuple[Tensor, Tensor]] = None,
-    X_observed: Optional[Tensor] = None,
-    X_pending: Optional[Tensor] = None,
+    outcome_constraints: tuple[Tensor, Tensor] | None = None,
+    X_observed: Tensor | None = None,
+    X_pending: Tensor | None = None,
     *,
     mc_samples: int = DEFAULT_EHVI_MC_SAMPLES,
-    alpha: Optional[float] = None,
-    seed: Optional[int] = None,
+    alpha: float | None = None,
+    seed: int | None = None,
 ) -> qExpectedHypervolumeImprovement:
     r"""Instantiates a qExpectedHyperVolumeImprovement acquisition function.
 
@@ -349,8 +355,7 @@ def get_EHVI(
     Returns:
         qExpectedHypervolumeImprovement: The instantiated acquisition function.
     """
-    return checked_cast(
-        qExpectedHypervolumeImprovement,
+    return assert_is_instance(
         _get_EHVI(
             acqf_name="qEHVI",
             model=model,
@@ -363,6 +368,7 @@ def get_EHVI(
             alpha=alpha,
             seed=seed,
         ),
+        qExpectedHypervolumeImprovement,
     )
 
 
@@ -370,13 +376,13 @@ def get_qLogEHVI(
     model: Model,
     objective_weights: Tensor,
     objective_thresholds: Tensor,
-    outcome_constraints: Optional[tuple[Tensor, Tensor]] = None,
-    X_observed: Optional[Tensor] = None,
-    X_pending: Optional[Tensor] = None,
+    outcome_constraints: tuple[Tensor, Tensor] | None = None,
+    X_observed: Tensor | None = None,
+    X_pending: Tensor | None = None,
     *,
     mc_samples: int = DEFAULT_EHVI_MC_SAMPLES,
-    alpha: Optional[float] = None,
-    seed: Optional[int] = None,
+    alpha: float | None = None,
+    seed: int | None = None,
 ) -> qLogExpectedHypervolumeImprovement:
     r"""Instantiates a qLogExpectedHyperVolumeImprovement acquisition function.
 
@@ -408,8 +414,7 @@ def get_qLogEHVI(
     Returns:
         qLogExpectedHypervolumeImprovement: The instantiated acquisition function.
     """
-    return checked_cast(
-        qLogExpectedHypervolumeImprovement,
+    return assert_is_instance(
         _get_EHVI(
             acqf_name="qLogEHVI",
             model=model,
@@ -422,6 +427,7 @@ def get_qLogEHVI(
             alpha=alpha,
             seed=seed,
         ),
+        qLogExpectedHypervolumeImprovement,
     )
 
 
@@ -430,16 +436,16 @@ def _get_EHVI(
     model: Model,
     objective_weights: Tensor,
     objective_thresholds: Tensor,
-    outcome_constraints: Optional[tuple[Tensor, Tensor]] = None,
-    X_observed: Optional[Tensor] = None,
-    X_pending: Optional[Tensor] = None,
+    outcome_constraints: tuple[Tensor, Tensor] | None = None,
+    X_observed: Tensor | None = None,
+    X_pending: Tensor | None = None,
     *,
     mc_samples: int = DEFAULT_EHVI_MC_SAMPLES,
-    alpha: Optional[float] = None,
-    seed: Optional[int] = None,
-) -> Union[qExpectedHypervolumeImprovement, qLogExpectedHypervolumeImprovement]:
+    alpha: float | None = None,
+    seed: int | None = None,
+) -> qExpectedHypervolumeImprovement | qLogExpectedHypervolumeImprovement:
     if X_observed is None:
-        raise ValueError(NO_FEASIBLE_POINTS_MESSAGE)
+        raise ValueError(NO_OBSERVED_POINTS_MESSAGE)
     # construct Objective module
     (
         objective,
@@ -453,7 +459,9 @@ def _get_EHVI(
     if outcome_constraints is None:
         cons_tfs = None
     else:
-        cons_tfs = get_outcome_constraint_transforms(outcome_constraints)
+        cons_tfs = get_outcome_constraint_transforms(
+            outcome_constraints=outcome_constraints
+        )
     num_objectives = objective_thresholds.shape[0]
     # NOTE: Not using checked_cast here because for Python 3.9, isinstance fails with
     # `TypeError: Subscripted generics cannot be used with class and instance checks`.
@@ -487,12 +495,12 @@ def _get_EHVI(
 def scipy_optimizer_list(
     acq_function_list: list[AcquisitionFunction],
     bounds: Tensor,
-    inequality_constraints: Optional[list[tuple[Tensor, Tensor, float]]] = None,
-    fixed_features: Optional[dict[int, float]] = None,
-    rounding_func: Optional[Callable[[Tensor], Tensor]] = None,
+    inequality_constraints: list[tuple[Tensor, Tensor, float]] | None = None,
+    fixed_features: dict[int, float] | None = None,
+    rounding_func: Callable[[Tensor], Tensor] | None = None,
     num_restarts: int = 20,
-    raw_samples: Optional[int] = None,
-    options: Optional[dict[str, Union[bool, float, int, str]]] = None,
+    raw_samples: int | None = None,
+    options: dict[str, bool | float | int | str] | None = None,
 ) -> tuple[Tensor, Tensor]:
     r"""Sequential optimizer using scipy's minimize module on a numpy-adaptor.
 
@@ -521,7 +529,7 @@ def scipy_optimizer_list(
           conditional on having observed candidates `0,1,...,i-1`.
     """
     # Use SLSQP by default for small problems since it yields faster wall times.
-    optimize_options: dict[str, Union[bool, float, int, str]] = {
+    optimize_options: dict[str, bool | float | int | str] = {
         "batch_limit": 5,
         "init_batch_limit": 32,
         "method": "SLSQP",
@@ -542,13 +550,13 @@ def scipy_optimizer_list(
 
 
 def pareto_frontier_evaluator(
-    model: Optional[TorchModel],
+    model: TorchModel | None,
     objective_weights: Tensor,
-    objective_thresholds: Optional[Tensor] = None,
-    X: Optional[Tensor] = None,
-    Y: Optional[Tensor] = None,
-    Yvar: Optional[Tensor] = None,
-    outcome_constraints: Optional[tuple[Tensor, Tensor]] = None,
+    objective_thresholds: Tensor | None = None,
+    X: Tensor | None = None,
+    Y: Tensor | None = None,
+    Yvar: Tensor | None = None,
+    outcome_constraints: tuple[Tensor, Tensor] | None = None,
 ) -> tuple[Tensor, Tensor, Tensor]:
     """Return outcomes predicted to lie on a pareto frontier.
 
@@ -581,7 +589,7 @@ def pareto_frontier_evaluator(
     # TODO: better input validation, making more explicit whether we are using
     # model predictions or not
     if X is not None:
-        Y, Yvar = not_none(model).predict(X)
+        Y, Yvar = none_throws(model).predict(X)
         # model.predict returns cpu tensors
         Y = Y.to(X.device)
         Yvar = Yvar.to(X.device)
@@ -654,14 +662,14 @@ def pareto_frontier_evaluator(
 def infer_objective_thresholds(
     model: Model,
     objective_weights: Tensor,  # objective_directions
-    bounds: Optional[list[tuple[float, float]]] = None,
-    outcome_constraints: Optional[tuple[Tensor, Tensor]] = None,
-    linear_constraints: Optional[tuple[Tensor, Tensor]] = None,
-    fixed_features: Optional[dict[int, float]] = None,
-    subset_idcs: Optional[Tensor] = None,
-    Xs: Optional[list[Tensor]] = None,
-    X_observed: Optional[Tensor] = None,
-    objective_thresholds: Optional[Tensor] = None,
+    bounds: list[tuple[float, float]] | None = None,
+    outcome_constraints: tuple[Tensor, Tensor] | None = None,
+    linear_constraints: tuple[Tensor, Tensor] | None = None,
+    fixed_features: dict[int, float] | None = None,
+    subset_idcs: Tensor | None = None,
+    Xs: list[Tensor] | None = None,
+    X_observed: Tensor | None = None,
+    objective_thresholds: Tensor | None = None,
 ) -> Tensor:
     """Infer objective thresholds.
 
@@ -743,7 +751,7 @@ def infer_objective_thresholds(
             )
     with torch.no_grad():
         pred = _check_posterior_type(
-            not_none(model).posterior(not_none(X_observed))
+            none_throws(model).posterior(none_throws(X_observed))
         ).mean
 
     if outcome_constraints is not None:
@@ -783,7 +791,7 @@ def infer_objective_thresholds(
 
 def _check_posterior_type(
     posterior: Posterior,
-) -> Union[GPyTorchPosterior, PosteriorList]:
+) -> GPyTorchPosterior | PosteriorList:
     """Check whether the posterior type is  `GPyTorchPosterior` or `PosteriorList`."""
     if isinstance(posterior, GPyTorchPosterior) or isinstance(posterior, PosteriorList):
         return posterior

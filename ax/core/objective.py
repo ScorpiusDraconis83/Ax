@@ -11,13 +11,13 @@ from __future__ import annotations
 import warnings
 from collections.abc import Iterable
 from logging import Logger
-from typing import Any, Optional
+from typing import Any
 
 from ax.core.metric import Metric
 from ax.exceptions.core import UserInputError
 from ax.utils.common.base import SortableBase
 from ax.utils.common.logger import get_logger
-from ax.utils.common.typeutils import not_none
+from pyre_extensions import none_throws
 
 logger: Logger = get_logger(__name__)
 
@@ -29,7 +29,7 @@ class Objective(SortableBase):
         minimize: If True, minimize metric.
     """
 
-    def __init__(self, metric: Metric, minimize: Optional[bool] = None) -> None:
+    def __init__(self, metric: Metric, minimize: bool | None = None) -> None:
         """Create a new objective.
 
         Args:
@@ -56,7 +56,7 @@ class Objective(SortableBase):
                 f"{minimize=}."
             )
         self._metric: Metric = metric
-        self.minimize: bool = not_none(minimize)
+        self.minimize: bool = none_throws(minimize)
 
     @property
     def metric(self) -> Metric:
@@ -104,7 +104,7 @@ class MultiObjective(Objective):
 
     def __init__(
         self,
-        objectives: Optional[list[Objective]] = None,
+        objectives: list[Objective] | None = None,
         **extra_kwargs: Any,  # Here to satisfy serialization.
     ) -> None:
         """Create a new objective.
@@ -136,7 +136,7 @@ class MultiObjective(Objective):
                 objectives.append(Objective(metric=metric, minimize=minimize))
 
         # pyre-fixme[4]: Attribute must be annotated.
-        self._objectives = not_none(objectives)
+        self._objectives = none_throws(objectives)
 
         # For now, assume all objectives are weighted equally.
         # This might be used in the future to change emphasis on the
@@ -186,7 +186,7 @@ class ScalarizedObjective(Objective):
     def __init__(
         self,
         metrics: list[Metric],
-        weights: Optional[list[float]] = None,
+        weights: list[float] | None = None,
         minimize: bool = False,
     ) -> None:
         """Create a new objective.

@@ -6,7 +6,6 @@
 
 # pyre-strict
 
-from typing import Optional
 
 from ax.core.observation import (
     Observation,
@@ -36,20 +35,20 @@ from ax.models.types import TConfig
 FIT_MODEL_ERROR = "Model must be fit before {action}."
 
 
-# pyre-fixme[13]: Attribute `model` is never initialized.
-# pyre-fixme[13]: Attribute `outcomes` is never initialized.
-# pyre-fixme[13]: Attribute `parameters` is never initialized.
-# pyre-fixme[13]: Attribute `search_space` is never initialized.
 class DiscreteModelBridge(ModelBridge):
     """A model bridge for using models based on discrete parameters.
 
     Requires that all parameters have been transformed to ChoiceParameters.
     """
 
+    # pyre-fixme[13]: Attribute `model` is never initialized.
     model: DiscreteModel
+    # pyre-fixme[13]: Attribute `outcomes` is never initialized.
     outcomes: list[str]
+    # pyre-fixme[13]: Attribute `parameters` is never initialized.
     parameters: list[str]
-    search_space: Optional[SearchSpace]
+    # pyre-fixme[13]: Attribute `search_space` is never initialized.
+    search_space: SearchSpace | None
 
     def _fit(
         self,
@@ -97,11 +96,11 @@ class DiscreteModelBridge(ModelBridge):
     def _validate_gen_inputs(
         self,
         n: int,
-        search_space: Optional[SearchSpace] = None,
-        optimization_config: Optional[OptimizationConfig] = None,
-        pending_observations: Optional[dict[str, list[ObservationFeatures]]] = None,
-        fixed_features: Optional[ObservationFeatures] = None,
-        model_gen_options: Optional[TConfig] = None,
+        search_space: SearchSpace | None = None,
+        optimization_config: OptimizationConfig | None = None,
+        pending_observations: dict[str, list[ObservationFeatures]] | None = None,
+        fixed_features: ObservationFeatures | None = None,
+        model_gen_options: TConfig | None = None,
     ) -> None:
         """Validate inputs to `ModelBridge.gen`.
 
@@ -118,9 +117,9 @@ class DiscreteModelBridge(ModelBridge):
         n: int,
         search_space: SearchSpace,
         pending_observations: dict[str, list[ObservationFeatures]],
-        fixed_features: Optional[ObservationFeatures],
-        model_gen_options: Optional[TConfig] = None,
-        optimization_config: Optional[OptimizationConfig] = None,
+        fixed_features: ObservationFeatures | None,
+        model_gen_options: TConfig | None = None,
+        optimization_config: OptimizationConfig | None = None,
     ) -> GenResults:
         """Generate new candidates according to search_space and
         optimization_config.
@@ -153,7 +152,7 @@ class DiscreteModelBridge(ModelBridge):
 
         # Pending observations
         if len(pending_observations) == 0:
-            pending_array: Optional[list[list[TParamValueList]]] = None
+            pending_array: list[list[TParamValueList]] | None = None
         else:
             pending_array = [[] for _ in self.outcomes]
             for metric_name, po_list in pending_observations.items():
@@ -171,19 +170,22 @@ class DiscreteModelBridge(ModelBridge):
             pending_observations=pending_array,
             model_gen_options=model_gen_options,
         )
-        observation_features = []
-        for x in X:
-            observation_features.append(
-                ObservationFeatures(
-                    parameters={p: x[i] for i, p in enumerate(self.parameters)}
-                )
+        observation_features = [
+            ObservationFeatures(parameters=dict(zip(self.parameters, x))) for x in X
+        ]
+
+        if "best_x" in gen_metadata:
+            best_observation_features = ObservationFeatures(
+                parameters=dict(zip(self.parameters, gen_metadata["best_x"]))
             )
-        # TODO[drfreund, bletham]: implement best_point identification and
-        # return best_point instead of None
+        else:
+            best_observation_features = None
+
         return GenResults(
             observation_features=observation_features,
             weights=w,
             gen_metadata=gen_metadata,
+            best_observation_features=best_observation_features,
         )
 
     def _cross_validate(

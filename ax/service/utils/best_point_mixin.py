@@ -10,7 +10,6 @@ from abc import ABCMeta, abstractmethod
 from collections.abc import Iterable
 from functools import partial
 from logging import Logger
-from typing import Optional
 
 import numpy as np
 import torch
@@ -21,7 +20,9 @@ from ax.core.optimization_config import (
     MultiObjectiveOptimizationConfig,
     OptimizationConfig,
 )
+from ax.core.trial import Trial
 from ax.core.types import TModelPredictArm, TParameterization
+from ax.exceptions.core import UserInputError
 from ax.modelbridge.generation_strategy import GenerationStrategy
 from ax.modelbridge.modelbridge_utils import (
     extract_objective_thresholds,
@@ -44,9 +45,10 @@ from ax.service.utils.best_point import (
     extract_Y_from_data,
     fill_missing_thresholds_from_nadir,
 )
+from ax.service.utils.best_point_utils import select_baseline_name_default_first_trial
 from ax.utils.common.logger import get_logger
-from ax.utils.common.typeutils import checked_cast, not_none
 from botorch.utils.multi_objective.box_decompositions import DominatedPartitioning
+from pyre_extensions import assert_is_instance, none_throws
 
 
 logger: Logger = get_logger(__name__)
@@ -58,10 +60,10 @@ class BestPointMixin(metaclass=ABCMeta):
     @abstractmethod
     def get_best_trial(
         self,
-        optimization_config: Optional[OptimizationConfig] = None,
-        trial_indices: Optional[Iterable[int]] = None,
+        optimization_config: OptimizationConfig | None = None,
+        trial_indices: Iterable[int] | None = None,
         use_model_predictions: bool = True,
-    ) -> Optional[tuple[int, TParameterization, Optional[TModelPredictArm]]]:
+    ) -> tuple[int, TParameterization, TModelPredictArm | None] | None:
         """Identifies the best parameterization tried in the experiment so far.
 
         First attempts to do so with the model used in optimization and
@@ -89,10 +91,10 @@ class BestPointMixin(metaclass=ABCMeta):
 
     def get_best_parameters(
         self,
-        optimization_config: Optional[OptimizationConfig] = None,
-        trial_indices: Optional[Iterable[int]] = None,
+        optimization_config: OptimizationConfig | None = None,
+        trial_indices: Iterable[int] | None = None,
         use_model_predictions: bool = True,
-    ) -> Optional[tuple[TParameterization, Optional[TModelPredictArm]]]:
+    ) -> tuple[TParameterization, TModelPredictArm | None] | None:
         """Identifies the best parameterization tried in the experiment so far.
 
         First attempts to do so with the model used in optimization and
@@ -131,10 +133,10 @@ class BestPointMixin(metaclass=ABCMeta):
     @abstractmethod
     def get_pareto_optimal_parameters(
         self,
-        optimization_config: Optional[OptimizationConfig] = None,
-        trial_indices: Optional[Iterable[int]] = None,
+        optimization_config: OptimizationConfig | None = None,
+        trial_indices: Iterable[int] | None = None,
         use_model_predictions: bool = True,
-    ) -> Optional[dict[int, tuple[TParameterization, TModelPredictArm]]]:
+    ) -> dict[int, tuple[TParameterization, TModelPredictArm]]:
         """Identifies the best parameterizations tried in the experiment so far,
         using model predictions if ``use_model_predictions`` is true and using
         observed values from the experiment otherwise. By default, uses model
@@ -158,20 +160,21 @@ class BestPointMixin(metaclass=ABCMeta):
                 observed values.
 
         Returns:
-            ``None`` if it was not possible to extract the Pareto frontier,
-            otherwise a mapping from trial index to the tuple of:
+            A mapping from trial index to the tuple of:
             - the parameterization of the arm in that trial,
             - two-item tuple of metric means dictionary and covariance matrix
                 (model-predicted if ``use_model_predictions=True`` and observed
                 otherwise).
+            Raises a `NotImplementedError` if extracting the Pareto frontier is
+            not possible. Note that the returned dict may be empty.
         """
         pass
 
     @abstractmethod
     def get_hypervolume(
         self,
-        optimization_config: Optional[MultiObjectiveOptimizationConfig] = None,
-        trial_indices: Optional[Iterable[int]] = None,
+        optimization_config: MultiObjectiveOptimizationConfig | None = None,
+        trial_indices: Iterable[int] | None = None,
         use_model_predictions: bool = True,
     ) -> float:
         """Calculate hypervolume of a pareto frontier based on either the posterior
@@ -192,7 +195,7 @@ class BestPointMixin(metaclass=ABCMeta):
 
     @abstractmethod
     def get_trace(
-        optimization_config: Optional[OptimizationConfig] = None,
+        optimization_config: OptimizationConfig | None = None,
     ) -> list[float]:
         """Get the optimization trace of the given experiment.
 
@@ -213,8 +216,8 @@ class BestPointMixin(metaclass=ABCMeta):
 
     @abstractmethod
     def get_trace_by_progression(
-        optimization_config: Optional[OptimizationConfig] = None,
-        bins: Optional[list[float]] = None,
+        optimization_config: OptimizationConfig | None = None,
+        bins: list[float] | None = None,
         final_progression_only: bool = False,
     ) -> tuple[list[float], list[float]]:
         """Get the optimization trace with respect to trial progressions instead of
@@ -254,11 +257,11 @@ class BestPointMixin(metaclass=ABCMeta):
     def _get_best_trial(
         experiment: Experiment,
         generation_strategy: GenerationStrategy,
-        optimization_config: Optional[OptimizationConfig] = None,
-        trial_indices: Optional[Iterable[int]] = None,
+        optimization_config: OptimizationConfig | None = None,
+        trial_indices: Iterable[int] | None = None,
         use_model_predictions: bool = True,
-    ) -> Optional[tuple[int, TParameterization, Optional[TModelPredictArm]]]:
-        optimization_config = optimization_config or not_none(
+    ) -> tuple[int, TParameterization, TModelPredictArm | None] | None:
+        optimization_config = optimization_config or none_throws(
             experiment.optimization_config
         )
         if optimization_config.is_moo_problem:
@@ -300,9 +303,9 @@ class BestPointMixin(metaclass=ABCMeta):
     @staticmethod
     def _get_best_observed_value(
         experiment: Experiment,
-        optimization_config: Optional[OptimizationConfig] = None,
-        trial_indices: Optional[Iterable[int]] = None,
-    ) -> Optional[float]:
+        optimization_config: OptimizationConfig | None = None,
+        trial_indices: Iterable[int] | None = None,
+    ) -> float | None:
         """Identifies the best objective value observed in the experiment
         among the trials indicated by `trial_indices`.
 
@@ -317,7 +320,7 @@ class BestPointMixin(metaclass=ABCMeta):
             The best objective value so far.
         """
         if optimization_config is None:
-            optimization_config = not_none(experiment.optimization_config)
+            optimization_config = none_throws(experiment.optimization_config)
         if optimization_config.is_moo_problem:
             raise NotImplementedError(
                 "Please use `get_hypervolume` for multi-objective problems."
@@ -333,7 +336,7 @@ class BestPointMixin(metaclass=ABCMeta):
         if predictions is None:
             return None
 
-        means = not_none(predictions)[0]
+        means = none_throws(predictions)[0]
         objective = optimization_config.objective
         if isinstance(objective, ScalarizedObjective):
             value = 0
@@ -348,11 +351,11 @@ class BestPointMixin(metaclass=ABCMeta):
     def _get_pareto_optimal_parameters(
         experiment: Experiment,
         generation_strategy: GenerationStrategy,
-        optimization_config: Optional[OptimizationConfig] = None,
-        trial_indices: Optional[Iterable[int]] = None,
+        optimization_config: OptimizationConfig | None = None,
+        trial_indices: Iterable[int] | None = None,
         use_model_predictions: bool = True,
     ) -> dict[int, tuple[TParameterization, TModelPredictArm]]:
-        optimization_config = optimization_config or not_none(
+        optimization_config = optimization_config or none_throws(
             experiment.optimization_config
         )
         if not optimization_config.is_moo_problem:
@@ -371,16 +374,16 @@ class BestPointMixin(metaclass=ABCMeta):
     def _get_hypervolume(
         experiment: Experiment,
         generation_strategy: GenerationStrategy,
-        optimization_config: Optional[MultiObjectiveOptimizationConfig] = None,
-        trial_indices: Optional[Iterable[int]] = None,
+        optimization_config: MultiObjectiveOptimizationConfig | None = None,
+        trial_indices: Iterable[int] | None = None,
         use_model_predictions: bool = True,
     ) -> float:
         data = experiment.lookup_data()
         if len(data.df) == 0:
             return 0.0
-        moo_optimization_config = checked_cast(
-            MultiObjectiveOptimizationConfig,
+        moo_optimization_config = assert_is_instance(
             optimization_config or experiment.optimization_config,
+            MultiObjectiveOptimizationConfig,
         )
 
         if use_model_predictions:
@@ -402,7 +405,7 @@ class BestPointMixin(metaclass=ABCMeta):
                 )
 
             model = get_model_from_generator_run(
-                generator_run=not_none(generation_strategy.last_generator_run),
+                generator_run=none_throws(generation_strategy.last_generator_run),
                 experiment=experiment,
                 data=experiment.fetch_data(trial_indices=trial_indices),
                 models_enum=models_enum,
@@ -429,14 +432,14 @@ class BestPointMixin(metaclass=ABCMeta):
     @staticmethod
     def _get_trace(
         experiment: Experiment,
-        optimization_config: Optional[OptimizationConfig] = None,
+        optimization_config: OptimizationConfig | None = None,
     ) -> list[float]:
         """Compute the optimization trace at each iteration.
 
         Given an experiment and an optimization config, compute the performance
-        at each iteration. For multi-objective, the performance is compute as the
-        hypervolume. For single objective, the performance is compute as the best
-        observed objective value.
+        at each iteration. For multi-objective, the performance is computed as
+        the hypervolume. For single objective, the performance is computed as
+        the best observed objective value.
 
         An iteration here refers to a completed or early-stopped (batch) trial.
         There will be one performance metric in the trace for each iteration.
@@ -449,7 +452,7 @@ class BestPointMixin(metaclass=ABCMeta):
         Returns:
             A list of performance values at each iteration.
         """
-        optimization_config = optimization_config or not_none(
+        optimization_config = optimization_config or none_throws(
             experiment.optimization_config
         )
         # Get the names of the metrics in optimization config.
@@ -495,7 +498,7 @@ class BestPointMixin(metaclass=ABCMeta):
                 objective=optimization_config.objective,
                 outcomes=metric_names,
             )
-            objective_thresholds = to_tensor(not_none(objective_thresholds))
+            objective_thresholds = to_tensor(none_throws(objective_thresholds))
         else:
             objective_thresholds = None
         (
@@ -518,7 +521,7 @@ class BestPointMixin(metaclass=ABCMeta):
                 weighted_objective_thresholds,
             ) = get_weighted_mc_objective_and_objective_thresholds(
                 objective_weights=objective_weights,
-                objective_thresholds=not_none(objective_thresholds),
+                objective_thresholds=none_throws(objective_thresholds),
             )
             Y_obj = obj(Y)
             infeas_value = weighted_objective_thresholds
@@ -527,7 +530,9 @@ class BestPointMixin(metaclass=ABCMeta):
             infeas_value = Y_obj.min()
         # Account for feasibility.
         if outcome_constraints is not None:
-            cons_tfs = not_none(get_outcome_constraint_transforms(outcome_constraints))
+            cons_tfs = none_throws(
+                get_outcome_constraint_transforms(outcome_constraints)
+            )
             feas = torch.all(torch.stack([c(Y) <= 0 for c in cons_tfs], dim=-1), dim=-1)
             # Set the infeasible points to reference point or the worst observed value.
             Y_obj[~feas] = infeas_value
@@ -569,11 +574,11 @@ class BestPointMixin(metaclass=ABCMeta):
     @staticmethod
     def _get_trace_by_progression(
         experiment: Experiment,
-        optimization_config: Optional[OptimizationConfig] = None,
-        bins: Optional[list[float]] = None,
+        optimization_config: OptimizationConfig | None = None,
+        bins: list[float] | None = None,
         final_progression_only: bool = False,
     ) -> tuple[list[float], list[float]]:
-        optimization_config = optimization_config or not_none(
+        optimization_config = optimization_config or none_throws(
             experiment.optimization_config
         )
         objective = optimization_config.objective.metric.name
@@ -620,6 +625,8 @@ class BestPointMixin(metaclass=ABCMeta):
         else:
             bins = np.array(bins)  # pyre-ignore[9]
 
+        # pyre-fixme[9]: bins has type `Optional[List[float]]`; used as
+        #  `ndarray[typing.Any, dtype[typing.Any]]`.
         bins = np.expand_dims(bins, axis=0)
 
         # compute for each bin value the largest trial index finished by then
@@ -629,4 +636,122 @@ class BestPointMixin(metaclass=ABCMeta):
         )
         obj_vals = (df["mean"].cummin() if minimize else df["mean"].cummax()).to_numpy()
         best_observed = obj_vals[best_observed_idcs]
+        # pyre-fixme[16]: Item `List` of `Union[List[float], ndarray[typing.Any,
+        #  np.dtype[typing.Any]]]` has no attribute `squeeze`.
         return best_observed.tolist(), bins.squeeze(axis=0).tolist()
+
+    def get_improvement_over_baseline(
+        self,
+        experiment: Experiment,
+        generation_strategy: GenerationStrategy,
+        baseline_arm_name: str | None = None,
+    ) -> float:
+        """Returns the scalarized improvement over baseline, if applicable.
+
+        Returns:
+            For Single Objective cases, returns % improvement of objective.
+            Positive indicates improvement over baseline. Negative indicates regression.
+            For Multi Objective cases, throws NotImplementedError
+        """
+        if experiment.is_moo_problem:
+            raise NotImplementedError(
+                "`get_improvement_over_baseline` not yet implemented"
+                + " for multi-objective problems."
+            )
+        if not baseline_arm_name:
+            baseline_arm_name, _ = select_baseline_name_default_first_trial(
+                experiment=experiment,
+                baseline_arm_name=baseline_arm_name,
+            )
+
+        optimization_config = experiment.optimization_config
+        if not optimization_config:
+            raise ValueError("No optimization config found.")
+
+        objective_metric_name = optimization_config.objective.metric.name
+
+        # get the baseline trial
+        data = experiment.lookup_data().df
+        data = data[data["arm_name"] == baseline_arm_name]
+        if len(data) == 0:
+            raise UserInputError(
+                "`get_improvement_over_baseline`"
+                " could not find baseline arm"
+                f" `{baseline_arm_name}` in the experiment data."
+            )
+        data = data[data["metric_name"] == objective_metric_name]
+        baseline_value = data.iloc[0]["mean"]
+
+        # Find objective value of the best trial
+        idx, param, best_arm = none_throws(
+            self._get_best_trial(
+                experiment=experiment,
+                generation_strategy=generation_strategy,
+                optimization_config=optimization_config,
+                use_model_predictions=False,
+            )
+        )
+        best_arm = none_throws(best_arm)
+        best_obj_value = best_arm[0][objective_metric_name]
+
+        def percent_change(x: float, y: float, minimize: bool) -> float:
+            if x == 0:
+                raise ZeroDivisionError(
+                    "Cannot compute percent improvement when denom is zero"
+                )
+            percent_change = (y - x) / abs(x) * 100
+            if minimize:
+                percent_change = -percent_change
+            return percent_change
+
+        return percent_change(
+            x=baseline_value,
+            y=best_obj_value,
+            minimize=optimization_config.objective.minimize,
+        )
+
+    @staticmethod
+    def _to_best_point_tuple(
+        experiment: Experiment,
+        trial_index: int,
+        parameterization: TParameterization,
+        model_prediction: TModelPredictArm | None,
+    ) -> tuple[TParameterization, dict[str, float | tuple[float, float]], int, str]:
+        """
+        Return the tuple expected by the return signature of get_best_parameterization
+        and get_pareto_frontier in the Ax API.
+
+        TODO: Remove this helper when we clean up BestPointMixin.
+
+        Returns:
+            - The parameters predicted to have the best optimization value without
+                violating any outcome constraints.
+            - The metric values for the best parameterization. Uses model prediction if
+                use_model_predictions=True, otherwise returns observed data.
+            - The trial which most recently ran the best parameterization
+            - The name of the best arm (each trial has a unique name associated with
+                each parameterization)
+        """
+
+        if model_prediction is not None:
+            mean, covariance = model_prediction
+
+            prediction: dict[str, float | tuple[float, float]] = {
+                metric_name: (
+                    mean[metric_name],
+                    none_throws(covariance)[metric_name][metric_name],
+                )
+                for metric_name in mean.keys()
+            }
+        else:
+            data_dict = experiment.lookup_data(trial_indices=[trial_index]).df.to_dict()
+
+            prediction: dict[str, float | tuple[float, float]] = {
+                data_dict["metric_name"][i]: (data_dict["mean"][i], data_dict["sem"][i])
+                for i in range(len(data_dict["metric_name"]))
+            }
+
+        trial = assert_is_instance(experiment.trials[trial_index], Trial)
+        arm = none_throws(trial.arm)
+
+        return parameterization, prediction, trial_index, arm.name

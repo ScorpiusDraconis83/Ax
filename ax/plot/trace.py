@@ -7,18 +7,19 @@
 # pyre-strict
 
 from datetime import datetime, timedelta
-from typing import Any, Optional, Union
+from typing import Any
 
 import numpy as np
+import numpy.typing as npt
 import pandas as pd
 import plotly.graph_objs as go
 from ax.core.experiment import Experiment
 from ax.plot.base import AxPlotConfig, AxPlotTypes
 from ax.plot.color import COLORS, DISCRETE_COLOR_SCALE, rgba
 from ax.utils.common.timeutils import timestamps_in_range
-from ax.utils.common.typeutils import not_none
 from plotly import express as px
 from plotly.express.colors import sample_colorscale
+from pyre_extensions import none_throws
 
 FIVE_MINUTES = timedelta(minutes=5)
 
@@ -28,8 +29,8 @@ Traces = list[dict[str, Any]]
 
 
 def map_data_single_trace_scatters(
-    x: np.ndarray,
-    y: np.ndarray,
+    x: npt.NDArray,
+    y: npt.NDArray,
     legend_label: str,
     xlabel: str = "Trial progression",
     ylabel: str = "Trial performance",
@@ -97,12 +98,12 @@ def map_data_single_trace_scatters(
 def map_data_multiple_metrics_dropdown_plotly(
     title: str,
     metric_names: list[str],
-    xs_by_metric: dict[str, list[np.ndarray]],
-    ys_by_metric: dict[str, list[np.ndarray]],
+    xs_by_metric: dict[str, list[npt.NDArray]],
+    ys_by_metric: dict[str, list[npt.NDArray]],
     legend_labels_by_metric: dict[str, list[str]],
     stopping_markers_by_metric: dict[str, list[bool]],
     xlabels_by_metric: dict[str, str],
-    lower_is_better_by_metric: dict[str, Optional[bool]],
+    lower_is_better_by_metric: dict[str, bool | None],
     opacity: float = 0.75,
     color_map: str = "viridis",
     autoset_axis_limits: bool = True,
@@ -209,10 +210,10 @@ def map_data_multiple_metrics_dropdown_plotly(
 
 
 def mean_trace_scatter(
-    y: np.ndarray,
+    y: npt.NDArray,
     trace_color: tuple[int] = COLORS.STEELBLUE.value,
     legend_label: str = "mean",
-    hover_labels: Optional[list[str]] = None,
+    hover_labels: list[str] | None = None,
 ) -> go.Scatter:
     """Creates a graph object for trace of the mean of the given series across
     runs.
@@ -242,7 +243,7 @@ def mean_trace_scatter(
 
 
 def sem_range_scatter(
-    y: np.ndarray,
+    y: npt.NDArray,
     trace_color: tuple[int] = COLORS.STEELBLUE.value,
     legend_label: str = "",
 ) -> tuple[go.Scatter, go.Scatter]:
@@ -285,10 +286,10 @@ def sem_range_scatter(
 
 
 def mean_markers_scatter(
-    y: np.ndarray,
+    y: npt.NDArray,
     marker_color: tuple[int] = COLORS.LIGHT_PURPLE.value,
     legend_label: str = "",
-    hover_labels: Optional[list[str]] = None,
+    hover_labels: list[str] | None = None,
 ) -> go.Scatter:
     """Creates a graph object for trace of the mean of the given series across
     runs, with errorbars.
@@ -346,16 +347,16 @@ def optimum_objective_scatter(
 
 
 def optimization_trace_single_method_plotly(
-    y: np.ndarray,
-    optimum: Optional[float] = None,
-    model_transitions: Optional[list[int]] = None,
+    y: npt.NDArray,
+    optimum: float | None = None,
+    model_transitions: list[int] | None = None,
     title: str = "",
     ylabel: str = "",
-    hover_labels: Optional[list[str]] = None,
+    hover_labels: list[str] | None = None,
     trace_color: tuple[int] = COLORS.STEELBLUE.value,
     optimum_color: tuple[int] = COLORS.ORANGE.value,
     generator_change_color: tuple[int] = COLORS.TEAL.value,
-    optimization_direction: Optional[str] = "passthrough",
+    optimization_direction: str | None = "passthrough",
     plot_trial_points: bool = False,
     trial_points_color: tuple[int] = COLORS.LIGHT_PURPLE.value,
     autoset_axis_limits: bool = True,
@@ -449,9 +450,9 @@ def optimization_trace_single_method_plotly(
 
 
 def _autoset_axis_limits(
-    y: np.ndarray,
+    y: npt.NDArray,
     optimization_direction: str,
-    force_include_value: Optional[float] = None,
+    force_include_value: float | None = None,
 ) -> list[float]:
     """Provides automatic axis limits based on the data and optimization direction.
     All best points are included in this range, and by default the worst points are
@@ -481,16 +482,16 @@ def _autoset_axis_limits(
 
 
 def optimization_trace_single_method(
-    y: np.ndarray,
-    optimum: Optional[float] = None,
-    model_transitions: Optional[list[int]] = None,
+    y: npt.NDArray,
+    optimum: float | None = None,
+    model_transitions: list[int] | None = None,
     title: str = "",
     ylabel: str = "",
-    hover_labels: Optional[list[str]] = None,
+    hover_labels: list[str] | None = None,
     trace_color: tuple[int] = COLORS.STEELBLUE.value,
     optimum_color: tuple[int] = COLORS.ORANGE.value,
     generator_change_color: tuple[int] = COLORS.TEAL.value,
-    optimization_direction: Optional[str] = "passthrough",
+    optimization_direction: str | None = "passthrough",
     plot_trial_points: bool = False,
     trial_points_color: tuple[int] = COLORS.LIGHT_PURPLE.value,
     autoset_axis_limits: bool = True,
@@ -548,11 +549,11 @@ def optimization_trace_single_method(
 
 
 def optimization_trace_all_methods(
-    y_dict: dict[str, np.ndarray],
-    optimum: Optional[float] = None,
+    y_dict: dict[str, npt.NDArray],
+    optimum: float | None = None,
     title: str = "",
     ylabel: str = "",
-    hover_labels: Optional[list[str]] = None,
+    hover_labels: list[str] | None = None,
     trace_colors: list[tuple[int]] = DISCRETE_COLOR_SCALE,
     optimum_color: tuple[int] = COLORS.ORANGE.value,
 ) -> AxPlotConfig:
@@ -627,23 +628,31 @@ def optimization_times(
     """
     # Compute means and SEs
     methods = list(fit_times.keys())
-    fit_res: dict[str, Union[str, list[float]]] = {"name": "Fitting"}
+    fit_res: dict[str, str | list[float]] = {"name": "Fitting"}
     fit_res["mean"] = [np.mean(fit_times[m]) for m in methods]
     fit_res["2sems"] = [
-        2 * np.std(fit_times[m]) / np.sqrt(len(fit_times[m])) for m in methods
+        # pyre-fixme[58]: `*` is not supported for operand types `int` and
+        #  `floating[typing.Any]`.
+        2 * np.std(fit_times[m]) / np.sqrt(len(fit_times[m]))
+        for m in methods
     ]
-    gen_res: dict[str, Union[str, list[float]]] = {"name": "Generation"}
+    gen_res: dict[str, str | list[float]] = {"name": "Generation"}
     gen_res["mean"] = [np.mean(gen_times[m]) for m in methods]
     gen_res["2sems"] = [
-        2 * np.std(gen_times[m]) / np.sqrt(len(gen_times[m])) for m in methods
+        # pyre-fixme[58]: `*` is not supported for operand types `int` and
+        #  `floating[typing.Any]`.
+        2 * np.std(gen_times[m]) / np.sqrt(len(gen_times[m]))
+        for m in methods
     ]
     total_mean: list[float] = []
     total_2sems: list[float] = []
     for m in methods:
         totals = np.array(fit_times[m]) + np.array(gen_times[m])
         total_mean.append(np.mean(totals))
+        # pyre-fixme[58]: `*` is not supported for operand types `int` and
+        #  `floating[typing.Any]`.
         total_2sems.append(2 * np.std(totals) / np.sqrt(len(totals)))
-    total_res: dict[str, Union[str, list[float]]] = {
+    total_res: dict[str, str | list[float]] = {
         "name": "Total",
         "mean": total_mean,
         "2sems": total_2sems,
@@ -688,10 +697,10 @@ def get_running_trials_per_minute(
     experiment: Experiment,
     show_until_latest_end_plus_timedelta: timedelta = FIVE_MINUTES,
 ) -> AxPlotConfig:
-    trial_runtimes: list[tuple[int, datetime, Optional[datetime]]] = [
+    trial_runtimes: list[tuple[int, datetime, datetime | None]] = [
         (
             trial.index,
-            not_none(trial._time_run_started),
+            none_throws(trial._time_run_started),
             trial._time_completed,  # Time trial was completed, failed, or abandoned.
         )
         for trial in experiment.trials.values()
@@ -699,7 +708,7 @@ def get_running_trials_per_minute(
     ]
 
     earliest_start = min(tr[1] for tr in trial_runtimes)
-    latest_end = max(not_none(tr[2]) for tr in trial_runtimes if tr[2] is not None)
+    latest_end = max(none_throws(tr[2]) for tr in trial_runtimes if tr[2] is not None)
 
     running_during = {
         ts: [
@@ -708,7 +717,7 @@ def get_running_trials_per_minute(
             # Trial is running during a given timestamp if:
             # 1) it's run start time is at/before the timestamp,
             # 2) it's completion time has not yet come or is after the timestamp.
-            if t[1] <= ts and (True if t[2] is None else not_none(t[2]) >= ts)
+            if t[1] <= ts and (True if t[2] is None else none_throws(t[2]) >= ts)
         ]
         for ts in timestamps_in_range(
             earliest_start,
@@ -739,8 +748,8 @@ def plot_objective_value_vs_trial_index(
     exp_df: pd.DataFrame,
     metric_colname: str,
     minimize: bool,
-    title: Optional[str] = None,
-    hover_data_colnames: Optional[list[str]] = None,
+    title: str | None = None,
+    hover_data_colnames: list[str] | None = None,
     autoset_axis_limits: bool = True,
 ) -> go.Figure:
     """Returns a plotly figure showing the optimization trace for a single metric.
@@ -818,7 +827,7 @@ def compute_running_feasible_optimum_df(
     exp_df: pd.DataFrame,
     metric_colname: str,
     minimize: bool,
-    is_feasible_colname: Optional[str],
+    is_feasible_colname: str | None,
 ) -> pd.DataFrame:
     """Computes the running feasible optimum for a given metric."""
     # If feasibility column is not provided, assume all arms are feasible.

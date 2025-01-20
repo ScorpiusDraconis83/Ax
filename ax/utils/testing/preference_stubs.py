@@ -5,7 +5,8 @@
 
 # pyre-strict
 
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 import numpy as np
 import torch
@@ -14,8 +15,8 @@ from ax.core.experiment import Experiment
 from ax.core.types import TEvaluationOutcome, TParameterization
 from ax.service.utils.instantiation import InstantiationBase
 from ax.utils.common.constants import Keys
-from ax.utils.common.typeutils import checked_cast, not_none
 from botorch.utils.sampling import draw_sobol_samples
+from pyre_extensions import assert_is_instance, none_throws
 
 # from ExperimentType in ae/lazarus/fb/utils/if/ae.thrift
 PBO_EXPERIMENT_TYPE: str = "PREFERENCE_LEARNING"
@@ -24,7 +25,7 @@ PE_EXPERIMENT_TYPE: str = "PREFERENCE_EXPLORATION"
 
 def sum_utility(parameters: TParameterization) -> float:
     """Test utility function that sums over parameter values"""
-    values = [checked_cast(float, v) for v in parameters.values()]
+    values = [assert_is_instance(v, float) for v in parameters.values()]
     return sum(values)
 
 
@@ -75,8 +76,8 @@ def experimental_metric_eval(
 def get_pbo_experiment(
     num_parameters: int = 2,
     num_experimental_metrics: int = 3,
-    parameter_names: Optional[list[str]] = None,
-    tracking_metric_names: Optional[list[str]] = None,
+    parameter_names: list[str] | None = None,
+    tracking_metric_names: list[str] | None = None,
     num_experimental_trials: int = 3,
     num_preference_trials: int = 3,
     num_preference_trials_w_repeated_arm: int = 5,
@@ -135,6 +136,9 @@ def get_pbo_experiment(
         objectives=objectives,
         tracking_metric_names=tracking_metric_names,
         is_test=True,
+        # pyre-fixme[6]: For 9th argument expected `Optional[Dict[str, Union[None,
+        #  bool, float, int, str]]]` but got `Optional[Dict[str,
+        #  floating[typing.Any]]]`.
         status_quo=sq,
     )
 
@@ -151,7 +155,7 @@ def get_pbo_experiment(
     for t in range(num_experimental_trials):
         arm = {}
         for i, param_name in enumerate(experiment.search_space.parameters.keys()):
-            arm[param_name] = not_none(X)[t, i].item()
+            arm[param_name] = none_throws(X)[t, i].item()
         gr = (
             # pyre-ignore: Incompatible parameter type [6]
             GeneratorRun([Arm(arm), Arm(sq)])
@@ -166,7 +170,7 @@ def get_pbo_experiment(
         # create incomplete data by dropping the first metric
         if partial_data:
             for v in raw_data.values():
-                del checked_cast(dict, v)[tracking_metric_names[-1]]
+                del assert_is_instance(v, dict)[tracking_metric_names[-1]]
         trial.attach_batch_trial_data(raw_data=raw_data)
         trial.mark_running(no_runner_required=True)
         trial.mark_completed()
@@ -188,7 +192,7 @@ def get_pbo_experiment(
                         metric_name=param_name, metric_names=parameter_names
                     )
                 else:
-                    param_dict[param_name] = not_none(X)[t * 2 + j, i].item()
+                    param_dict[param_name] = none_throws(X)[t * 2 + j, i].item()
             arms.append(Arm(parameters=param_dict))
         gr = GeneratorRun(arms)
 

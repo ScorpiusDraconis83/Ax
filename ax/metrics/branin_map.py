@@ -10,11 +10,12 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from random import random
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
+import numpy.typing as npt
 import pandas as pd
 from ax.core.base_trial import BaseTrial
 from ax.core.map_data import MapData, MapKeyInfo
@@ -22,8 +23,8 @@ from ax.core.map_metric import MapMetricFetchResult
 from ax.core.metric import MetricFetchE
 from ax.metrics.noisy_function_map import NoisyFunctionMapMetric
 from ax.utils.common.result import Err, Ok
-from ax.utils.common.typeutils import checked_cast, not_none
 from ax.utils.measurement.synthetic_functions import branin
+from pyre_extensions import assert_is_instance
 
 FIDELITY = [0.1, 0.4, 0.7, 1.0]
 
@@ -34,15 +35,18 @@ class BraninTimestampMapMetric(NoisyFunctionMapMetric):
         name: str,
         param_names: Iterable[str],
         noise_sd: float = 0.0,
-        lower_is_better: Optional[bool] = None,
-        rate: Optional[float] = None,
+        lower_is_better: bool | None = None,
+        rate: float | None = None,
         cache_evaluations: bool = True,
+        decay_function_name: str = "exp_decay",
     ) -> None:
-        """A Branin map metric with an optional multiplicative factor
-        of `1 + exp(-rate * t)` where `t` is the runtime of the trial.
-        If the multiplicative factor is used, then at `t = 0`, the function
-        is twice the usual value, while as `t` becomes large, the values
-        approach the standard Branin values.
+        """A Branin map metric with an optional multiplicative factor of
+        `1 + decay_function(rate * t)` where `t` is the runtime of the trial.
+        `decay_function` is a function of the form `f: float -> float`, either
+        an exponential decay or a power law decay, and `rate` is the parameter that
+        controls the rate of decay. The functions decay to zero as `t` increases.
+        If the multiplicative factor is used, the function is `1 + f(0)` times the usual
+        value at `t = 0`, and approaches standard Branin values as `t` grows large.
 
         Args:
             name: Name of the metric.
@@ -51,8 +55,24 @@ class BraninTimestampMapMetric(NoisyFunctionMapMetric):
             noise_sd: Scale of normal noise added to the function result.
             lower_is_better: Flag for metrics which should be minimized.
             rate: Parameter of the multiplicative factor.
+            decay_function_name: The name of the function used to decay the
+                multiplicative factor. Options: "exp_decay", and "pow_decay".
         """
         self.rate = rate
+        self.decay_function_name = decay_function_name
+
+        def _exp_decay(x: float) -> float:
+            return math.exp(-x)
+
+        def _pow_decay(x: float) -> float:
+            return max(x, 1e-3) ** (-1 / np.pi)
+
+        decay_functions = {"exp_decay": _exp_decay, "pow_decay": _pow_decay}
+
+        self._decay_function: Callable[[float], float] = decay_functions[
+            decay_function_name
+        ]
+
         # pyre-fixme[4]: Attribute must be annotated.
         self._trial_index_to_timestamp = defaultdict(int)
 
@@ -117,21 +137,20 @@ class BraninTimestampMapMetric(NoisyFunctionMapMetric):
 
     # pyre-fixme[14]: `f` overrides method defined in `NoisyFunctionMapMetric`
     #  inconsistently.
-    def f(self, x: np.ndarray, timestamp: int) -> Mapping[str, Any]:
+    def f(self, x: npt.NDArray, timestamp: int) -> Mapping[str, Any]:
         x1, x2 = x
 
         if self.rate is not None:
-            weight = 1.0 + np.exp(-not_none(self.rate) * timestamp)
+            weight = 1.0 + self._decay_function(self.rate * timestamp)
         else:
             weight = 1.0
 
-        mean = checked_cast(float, branin(x1=x1, x2=x2)) * weight
+        mean = assert_is_instance(branin(x1=x1, x2=x2), float) * weight
 
         return {"mean": mean, "timestamp": timestamp}
 
 
 class BraninFidelityMapMetric(NoisyFunctionMapMetric):
-
     map_key_info: MapKeyInfo[float] = MapKeyInfo(key="fidelity", default_value=0.0)
 
     def __init__(
@@ -139,7 +158,7 @@ class BraninFidelityMapMetric(NoisyFunctionMapMetric):
         name: str,
         param_names: Iterable[str],
         noise_sd: float = 0.0,
-        lower_is_better: Optional[bool] = None,
+        lower_is_better: bool | None = None,
     ) -> None:
         super().__init__(
             name=name,
@@ -161,7 +180,7 @@ class BraninFidelityMapMetric(NoisyFunctionMapMetric):
             **kwargs,
         )
 
-    def f(self, x: np.ndarray) -> Mapping[str, Any]:
+    def f(self, x: npt.NDArray) -> Mapping[str, Any]:
         if self.index < len(FIDELITY):
             self.index += 1
 
@@ -169,6 +188,6 @@ class BraninFidelityMapMetric(NoisyFunctionMapMetric):
         fidelity = FIDELITY[self.index]
 
         fidelity_penalty = random() * math.pow(1.0 - fidelity, 2.0)
-        mean = checked_cast(float, branin(x1=x1, x2=x2)) - fidelity_penalty
+        mean = assert_is_instance(branin(x1=x1, x2=x2), float) - fidelity_penalty
 
         return {"mean": mean, "fidelity": fidelity}

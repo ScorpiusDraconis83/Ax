@@ -8,7 +8,7 @@ import os
 
 from setuptools import find_packages, setup
 
-PINNED_BOTORCH_VERSION = "0.11.3"
+PINNED_BOTORCH_VERSION = "0.12.0"
 
 if os.environ.get("ALLOW_BOTORCH_LATEST"):
     # allows a more recent previously installed version of botorch to remain
@@ -28,6 +28,7 @@ REQUIRES = [
     # Needed for compatibility with ipywidgets >= 8.0.0
     "plotly>=5.12.0",
     "pyre-extensions",
+    "sympy",
 ]
 
 # pytest-cov requires pytest >= 3.6
@@ -40,8 +41,8 @@ DEV_REQUIRES = [
     "pyfakefs",
     "pytest>=4.6",
     "pytest-cov",
-    "sphinx==5.3.0",
-    "sphinx-autodoc-typehints==1.19.5",
+    "sphinx",
+    "sphinx-autodoc-typehints",
     "torchvision>=0.5.0",
     "nbconvert",
     "jupyter-client==6.1.12",
@@ -87,7 +88,7 @@ def local_version(version):
 def setup_package() -> None:
     """Used for installing the Ax package."""
 
-    with open("README.md", "r") as fh:
+    with open("README.md") as fh:
         long_description = fh.read()
 
     setup(

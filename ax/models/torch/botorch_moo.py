@@ -6,8 +6,9 @@
 
 # pyre-strict
 
+from collections.abc import Callable
 from logging import Logger
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 import torch
 from ax.core.search_space import SearchSpaceDigest
@@ -44,9 +45,9 @@ from ax.models.torch_base import TorchGenResults, TorchModel, TorchOptConfig
 from ax.utils.common.constants import Keys
 from ax.utils.common.docutils import copy_doc
 from ax.utils.common.logger import get_logger
-from ax.utils.common.typeutils import checked_cast, not_none
 from botorch.acquisition.acquisition import AcquisitionFunction
 from botorch.models.model import Model
+from pyre_extensions import assert_is_instance, none_throws
 from torch import Tensor
 
 
@@ -180,8 +181,8 @@ class MultiObjectiveBotorchModel(BotorchModel):
     a tuple of tensors describing the (linear) outcome constraints.
     """
 
-    dtype: Optional[torch.dtype]
-    device: Optional[torch.device]
+    dtype: torch.dtype | None
+    device: torch.device | None
     Xs: list[Tensor]
     Ys: list[Tensor]
     Yvars: list[Tensor]
@@ -209,7 +210,7 @@ class MultiObjectiveBotorchModel(BotorchModel):
         warm_start_refitting: bool = False,
         use_input_warping: bool = False,
         use_loocv_pseudo_likelihood: bool = False,
-        prior: Optional[dict[str, Any]] = None,
+        prior: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> None:
         self.model_constructor = model_constructor
@@ -225,7 +226,7 @@ class MultiObjectiveBotorchModel(BotorchModel):
         self.use_input_warping = use_input_warping
         self.use_loocv_pseudo_likelihood = use_loocv_pseudo_likelihood
         self.prior = prior
-        self.model: Optional[Model] = None
+        self.model: Model | None = None
         self.Xs = []
         self.Ys = []
         self.Yvars = []
@@ -253,7 +254,7 @@ class MultiObjectiveBotorchModel(BotorchModel):
         if (
             torch_opt_config.objective_thresholds is not None
             and torch_opt_config.objective_weights.shape[0]
-            != not_none(torch_opt_config.objective_thresholds).shape[0]
+            != none_throws(torch_opt_config.objective_thresholds).shape[0]
         ):
             raise AxError(
                 "Objective weights and thresholds most both contain an element for"
@@ -270,7 +271,7 @@ class MultiObjectiveBotorchModel(BotorchModel):
             fixed_features=torch_opt_config.fixed_features,
         )
 
-        model = not_none(self.model)
+        model = none_throws(self.model)
         full_objective_thresholds = torch_opt_config.objective_thresholds
         full_objective_weights = torch_opt_config.objective_weights
         full_outcome_constraints = torch_opt_config.outcome_constraints
@@ -328,7 +329,7 @@ class MultiObjectiveBotorchModel(BotorchModel):
                 for objective_weights in objective_weights_list
             ]
             acquisition_function_list = [
-                checked_cast(AcquisitionFunction, acq_function)
+                assert_is_instance(acq_function, AcquisitionFunction)
                 for acq_function in acquisition_function_list
             ]
             # Multiple acquisition functions require a sequential optimizer
@@ -351,7 +352,7 @@ class MultiObjectiveBotorchModel(BotorchModel):
             ):
                 full_objective_thresholds = infer_objective_thresholds(
                     model=model,
-                    X_observed=not_none(X_observed),
+                    X_observed=none_throws(X_observed),
                     objective_weights=full_objective_weights,
                     outcome_constraints=full_outcome_constraints,
                     subset_idcs=idcs,
@@ -372,12 +373,14 @@ class MultiObjectiveBotorchModel(BotorchModel):
                 X_pending=X_pending,
                 **acf_options,
             )
-            acquisition_function = checked_cast(
-                AcquisitionFunction, acquisition_function
+            acquisition_function = assert_is_instance(
+                acquisition_function, AcquisitionFunction
             )
             # pyre-ignore: [28]
             candidates, expected_acquisition_value = self.acqf_optimizer(
-                acq_function=checked_cast(AcquisitionFunction, acquisition_function),
+                acq_function=assert_is_instance(
+                    acquisition_function, AcquisitionFunction
+                ),
                 bounds=bounds_,
                 n=n,
                 inequality_constraints=_to_inequality_constraints(

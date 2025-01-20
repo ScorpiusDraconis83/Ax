@@ -38,6 +38,12 @@ Transition Criterion
     :undoc-members:
     :show-inheritance:
 
+Generation Node Input Constructors
+.. automodule:: ax.modelbridge.generation_node_input_constructors
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
 Registry
 ~~~~~~~~
 .. automodule:: ax.modelbridge.registry
@@ -176,22 +182,6 @@ Transforms
     :undoc-members:
     :show-inheritance:
 
-`ax.modelbridge.transforms.cap_parameter`
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-.. automodule:: ax.modelbridge.transforms.cap_parameter
-    :members:
-    :undoc-members:
-    :show-inheritance:
-
-`ax.modelbridge.transforms.centered_unit_x`
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-.. automodule:: ax.modelbridge.transforms.centered_unit_x
-    :members:
-    :undoc-members:
-    :show-inheritance:
-
 `ax.modelbridge.transforms.choice\_encode`
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -216,6 +206,14 @@ Transforms
     :undoc-members:
     :show-inheritance:
 
+`ax.modelbridge.transforms.fill_missing_parameters`
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. automodule:: ax.modelbridge.transforms.fill_missing_parameters
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
 `ax.modelbridge.transforms.int\_range\_to\_choice`
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -236,14 +234,6 @@ Transforms
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. automodule:: ax.modelbridge.transforms.ivw
-    :members:
-    :undoc-members:
-    :show-inheritance:
-
-`ax.modelbridge.transforms.inverse_gaussian_cdf_y`
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-.. automodule:: ax.modelbridge.transforms.inverse_gaussian_cdf_y
     :members:
     :undoc-members:
     :show-inheritance:
@@ -304,14 +294,6 @@ Transforms
     :undoc-members:
     :show-inheritance:
 
-`ax.modelbridge.transforms.percentile_y`
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-.. automodule:: ax.modelbridge.transforms.percentile_y
-    :members:
-    :undoc-members:
-    :show-inheritance:
-
 `ax.modelbridge.transforms.power\_transform\_y`
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -324,6 +306,24 @@ Transforms
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. automodule:: ax.modelbridge.transforms.remove_fixed
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
+
+`ax.modelbridge.transforms.metadata\_to\_float`
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. automodule:: ax.modelbridge.transforms.metadata_to_float
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
+
+`ax.modelbridge.transforms.map\_key\_to\_float`
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. automodule:: ax.modelbridge.transforms.map_key_to_float
     :members:
     :undoc-members:
     :show-inheritance:
@@ -380,6 +380,14 @@ Transforms
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. automodule:: ax.modelbridge.transforms.time_as_feature
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
+`ax.modelbridge.transforms.transform\_to\_new\_sq`
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. automodule:: ax.modelbridge.transforms.transform_to_new_sq
     :members:
     :undoc-members:
     :show-inheritance:

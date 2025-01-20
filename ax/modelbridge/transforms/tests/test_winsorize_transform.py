@@ -8,7 +8,7 @@
 
 import warnings
 from copy import deepcopy
-from typing import Any, Optional
+from typing import Any, SupportsIndex
 from unittest import mock
 
 import numpy as np
@@ -44,7 +44,6 @@ from ax.utils.testing.core_stubs import (
     get_observations_with_invalid_value,
     get_optimization_config,
 )
-from typing_extensions import SupportsIndex
 
 INF = float("inf")
 OBSERVATION_DATA = [
@@ -573,7 +572,6 @@ class WinsorizeTransformTest(TestCase):
         self,
         mock_observations_from_data: mock.Mock,
     ) -> None:
-
         # ModelBridge with in-design status quo
         search_space = SearchSpace(
             parameters=[
@@ -684,12 +682,13 @@ def get_transform(observation_data, config=None, optimization_config=None) -> Wi
 
 def get_default_transform_cutoffs(
     optimization_config: OptimizationConfig,
-    winsorization_config: Optional[dict[str, WinsorizationConfig]] = None,
+    winsorization_config: dict[str, WinsorizationConfig] | None = None,
     obs_data_len: SupportsIndex = 6,
 ) -> dict[str, tuple[float, float]]:
     obsd = ObservationData(
         metric_names=["m1"] * obs_data_len,
         means=np.array(range(obs_data_len)),
+        # pyre-fixme[6]: For 1st argument expected `int` but got `SupportsIndex`.
         covariance=np.eye(obs_data_len),
     )
     obs = Observation(features=ObservationFeatures({}), data=obsd)

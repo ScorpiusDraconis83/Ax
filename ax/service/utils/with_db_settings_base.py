@@ -8,9 +8,10 @@
 
 import re
 import time
+from collections.abc import Iterable
 
 from logging import INFO, Logger
-from typing import Any, Iterable, Optional
+from typing import Optional, Sequence
 
 from ax.analysis.analysis import AnalysisCard
 
@@ -18,6 +19,7 @@ from ax.core.base_trial import BaseTrial
 from ax.core.experiment import Experiment
 from ax.core.generation_strategy_interface import GenerationStrategyInterface
 from ax.core.generator_run import GeneratorRun
+from ax.core.runner import Runner
 from ax.exceptions.core import (
     IncompatibleDependencyVersion,
     ObjectNotFoundError,
@@ -26,7 +28,7 @@ from ax.exceptions.core import (
 from ax.modelbridge.generation_strategy import GenerationStrategy
 from ax.utils.common.executils import retry_on_exception
 from ax.utils.common.logger import _round_floats_for_logging, get_logger
-from ax.utils.common.typeutils import not_none
+from pyre_extensions import none_throws
 
 RETRY_EXCEPTION_TYPES: tuple[type[Exception], ...] = ()
 
@@ -39,7 +41,7 @@ try:  # We don't require SQLAlchemy by default.
     from sqlalchemy import __version__ as sqa_version
 
     # pyre-fixme[16]: Module `sqlalchemy` has no attribute `__version__`.
-    sqa_major_version = int(not_none(re.match(r"^\d*", sqa_version))[0])
+    sqa_major_version = int(none_throws(re.match(r"^\d*", sqa_version))[0])
     if sqa_major_version > 1:
         msg = (
             "Ax currently requires a sqlalchemy version below 2.0. This will be "
@@ -68,6 +70,7 @@ try:  # We don't require SQLAlchemy by default.
         _update_generation_strategy,
         save_analysis_cards,
         update_properties_on_experiment,
+        update_runner_on_experiment,
     )
     from ax.storage.sqa_store.sqa_config import SQAConfig
     from ax.storage.sqa_store.structs import DBSettings
@@ -93,12 +96,6 @@ class WithDBSettingsBase:
     """
 
     _db_settings: Optional[DBSettings] = None
-
-    # Mapping of object types to mapping of fields to override values
-    # loaded objects will all be instantiated with fields set to
-    # override value
-    # current valid object types are: "runner"
-    AX_OBJECT_FIELD_OVERRIDES: dict[str, Any] = {}
 
     def __init__(
         self,
@@ -138,11 +135,11 @@ class WithDBSettingsBase:
         """DB settings set on this instance; guaranteed to be non-None."""
         if self._db_settings is None:
             raise ValueError("No DB settings are set on this instance.")
-        return not_none(self._db_settings)
+        return none_throws(self._db_settings)
 
     def _get_experiment_and_generation_strategy_db_id(
         self, experiment_name: str
-    ) -> tuple[Optional[int], Optional[int]]:
+    ) -> tuple[int | None, int | None]:
         """Retrieve DB ids of experiment by the given name and the associated
         generation strategy. Each ID is None if corresponding object is not
         found.
@@ -178,7 +175,7 @@ class WithDBSettingsBase:
                 raise ValueError(
                     "Experiment must specify a name to use storage functionality."
                 )
-            exp_name = not_none(experiment.name)
+            exp_name = none_throws(experiment.name)
             exp_id, gs_id = self._get_experiment_and_generation_strategy_db_id(
                 experiment_name=exp_name
             )
@@ -221,7 +218,7 @@ class WithDBSettingsBase:
         experiment_name: str,
         reduced_state: bool = False,
         skip_runners_and_metrics: bool = False,
-    ) -> tuple[Optional[Experiment], Optional[GenerationStrategy]]:
+    ) -> tuple[Experiment | None, GenerationStrategy | None]:
         """Loads experiment and its corresponding generation strategy from database
         if DB settings are set on this `WithDBSettingsBase` instance.
 
@@ -255,7 +252,6 @@ class WithDBSettingsBase:
             decoder=self.db_settings.decoder,
             reduced_state=reduced_state,
             load_trials_in_batches_of_size=LOADING_MINI_BATCH_SIZE,
-            ax_object_field_overrides=self.AX_OBJECT_FIELD_OVERRIDES,
             skip_runners_and_metrics=skip_runners_and_metrics,
         )
         if not isinstance(experiment, Experiment):
@@ -353,7 +349,7 @@ class WithDBSettingsBase:
     def _save_or_update_trials_in_db_if_possible(
         self,
         experiment: Experiment,
-        trials: list[BaseTrial],
+        trials: Sequence[BaseTrial],
         reduce_state_generator_runs: bool = False,
     ) -> bool:
         """Saves new trials or update existing trials on given experiment if DB
@@ -380,7 +376,7 @@ class WithDBSettingsBase:
 
     def _save_generation_strategy_to_db_if_possible(
         self,
-        generation_strategy: Optional[GenerationStrategyInterface] = None,
+        generation_strategy: GenerationStrategyInterface | None = None,
     ) -> bool:
         """Saves given generation strategy if DB settings are set on this
         `WithDBSettingsBase` instance and the generation strategy is an
@@ -443,6 +439,21 @@ class WithDBSettingsBase:
                 return True
         return False
 
+    def _update_runner_on_experiment_in_db_if_possible(
+        self, experiment: Experiment, runner: Runner
+    ) -> bool:
+        if self.db_settings_set:
+            _update_runner_on_experiment_in_db_if_possible(
+                experiment=experiment,
+                runner=runner,
+                encoder=self.db_settings.encoder,
+                decoder=self.db_settings.decoder,
+                suppress_all_errors=self._suppress_all_errors,
+            )
+            return True
+
+        return False
+
     def _update_experiment_properties_in_db(
         self,
         experiment_with_updated_properties: Experiment,
@@ -466,7 +477,8 @@ class WithDBSettingsBase:
             _save_analysis_cards_to_db_if_possible(
                 experiment=experiment,
                 analysis_cards=analysis_cards,
-                config=self.db_settings.encoder.config,
+                sqa_config=self.db_settings.encoder.config,
+                suppress_all_errors=self._suppress_all_errors,
             )
             return True
 
@@ -585,6 +597,23 @@ def _update_generation_strategy_in_db_if_possible(
     default_return_on_suppression=False,
     exception_types=RETRY_EXCEPTION_TYPES,
 )
+def _update_runner_on_experiment_in_db_if_possible(
+    experiment: Experiment,
+    runner: Runner,
+    encoder: Encoder,
+    decoder: Decoder,
+    suppress_all_errors: bool,  # Used by the decorator.
+) -> None:
+    update_runner_on_experiment(
+        experiment=experiment, runner=runner, encoder=encoder, decoder=decoder
+    )
+
+
+@retry_on_exception(
+    retries=3,
+    default_return_on_suppression=False,
+    exception_types=RETRY_EXCEPTION_TYPES,
+)
 def _update_experiment_properties_in_db(
     experiment_with_updated_properties: Experiment,
     sqa_config: SQAConfig,
@@ -617,9 +646,9 @@ def _save_analysis_cards_to_db_if_possible(
 def try_load_generation_strategy(
     experiment_name: str,
     decoder: Decoder,
-    experiment: Optional[Experiment] = None,
+    experiment: Experiment | None = None,
     reduced_state: bool = False,
-) -> Optional[GenerationStrategy]:
+) -> GenerationStrategy | None:
     """Load generation strategy by experiment name, if it exists."""
     try:
         start_time = time.time()

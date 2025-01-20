@@ -7,7 +7,6 @@
 # pyre-strict
 
 from logging import Logger
-from typing import Optional
 
 import torch
 from ax.core.data import Data
@@ -33,7 +32,7 @@ from ax.models.torch.botorch_defaults import (
 from ax.models.torch.utils import predict_from_model
 from ax.models.types import TConfig
 from ax.utils.common.logger import get_logger
-from ax.utils.common.typeutils import checked_cast
+from pyre_extensions import assert_is_instance
 
 
 logger: Logger = get_logger(__name__)
@@ -57,7 +56,7 @@ optimization model for subsequent trials).
 
 def get_sobol(
     search_space: SearchSpace,
-    seed: Optional[int] = None,
+    seed: int | None = None,
     deduplicate: bool = False,
     init_position: int = 0,
     scramble: bool = True,
@@ -72,8 +71,7 @@ def get_sobol(
     Returns:
         RandomModelBridge, with SobolGenerator as model.
     """
-    return checked_cast(
-        RandomModelBridge,
+    return assert_is_instance(
         Models.SOBOL(
             search_space=search_space,
             seed=seed,
@@ -82,11 +80,12 @@ def get_sobol(
             scramble=scramble,
             fallback_to_sample_polytope=fallback_to_sample_polytope,
         ),
+        RandomModelBridge,
     )
 
 
 def get_uniform(
-    search_space: SearchSpace, deduplicate: bool = False, seed: Optional[int] = None
+    search_space: SearchSpace, deduplicate: bool = False, seed: int | None = None
 ) -> RandomModelBridge:
     """Instantiate uniform generator.
 
@@ -97,32 +96,31 @@ def get_uniform(
     Returns:
         RandomModelBridge, with UniformGenerator as model.
     """
-    return checked_cast(
-        RandomModelBridge,
+    return assert_is_instance(
         Models.UNIFORM(search_space=search_space, seed=seed, deduplicate=deduplicate),
+        RandomModelBridge,
     )
 
 
 def get_botorch(
     experiment: Experiment,
     data: Data,
-    search_space: Optional[SearchSpace] = None,
+    search_space: SearchSpace | None = None,
     dtype: torch.dtype = torch.double,
     device: torch.device = DEFAULT_TORCH_DEVICE,
     transforms: list[type[Transform]] = Cont_X_trans + Y_trans,
-    transform_configs: Optional[dict[str, TConfig]] = None,
+    transform_configs: dict[str, TConfig] | None = None,
     model_constructor: TModelConstructor = get_and_fit_model,
     model_predictor: TModelPredictor = predict_from_model,
     acqf_constructor: TAcqfConstructor = get_qLogNEI,
     acqf_optimizer: TOptimizer = scipy_optimizer,  # pyre-ignore[9]
     refit_on_cv: bool = False,
-    optimization_config: Optional[OptimizationConfig] = None,
+    optimization_config: OptimizationConfig | None = None,
 ) -> TorchModelBridge:
     """Instantiates a BotorchModel."""
     if data.df.empty:
         raise ValueError("`BotorchModel` requires non-empty data.")
-    return checked_cast(
-        TorchModelBridge,
+    return assert_is_instance(
         Models.LEGACY_BOTORCH(
             experiment=experiment,
             data=data,
@@ -138,52 +136,30 @@ def get_botorch(
             refit_on_cv=refit_on_cv,
             optimization_config=optimization_config,
         ),
-    )
-
-
-def get_GPEI(
-    experiment: Experiment,
-    data: Data,
-    search_space: Optional[SearchSpace] = None,
-    dtype: torch.dtype = torch.double,
-    device: torch.device = DEFAULT_TORCH_DEVICE,
-) -> TorchModelBridge:
-    """Instantiates a GP model that generates points with EI."""
-    if data.df.empty:
-        raise ValueError("GP+EI BotorchModel requires non-empty data.")
-    return checked_cast(
         TorchModelBridge,
-        Models.LEGACY_BOTORCH(
-            experiment=experiment,
-            data=data,
-            search_space=search_space or experiment.search_space,
-            torch_dtype=dtype,
-            torch_device=device,
-        ),
     )
 
 
 def get_factorial(search_space: SearchSpace) -> DiscreteModelBridge:
     """Instantiates a factorial generator."""
-    return checked_cast(
-        DiscreteModelBridge,
+    return assert_is_instance(
         Models.FACTORIAL(search_space=search_space, fit_out_of_design=True),
+        DiscreteModelBridge,
     )
 
 
 def get_empirical_bayes_thompson(
     experiment: Experiment,
     data: Data,
-    search_space: Optional[SearchSpace] = None,
+    search_space: SearchSpace | None = None,
     num_samples: int = 10000,
-    min_weight: Optional[float] = None,
+    min_weight: float | None = None,
     uniform_weights: bool = False,
 ) -> DiscreteModelBridge:
     """Instantiates an empirical Bayes / Thompson sampling model."""
     if data.df.empty:
         raise ValueError("Empirical Bayes Thompson sampler requires non-empty data.")
-    return checked_cast(
-        DiscreteModelBridge,
+    return assert_is_instance(
         Models.EMPIRICAL_BAYES_THOMPSON(
             experiment=experiment,
             data=data,
@@ -193,22 +169,22 @@ def get_empirical_bayes_thompson(
             uniform_weights=uniform_weights,
             fit_out_of_design=True,
         ),
+        DiscreteModelBridge,
     )
 
 
 def get_thompson(
     experiment: Experiment,
     data: Data,
-    search_space: Optional[SearchSpace] = None,
+    search_space: SearchSpace | None = None,
     num_samples: int = 10000,
-    min_weight: Optional[float] = None,
+    min_weight: float | None = None,
     uniform_weights: bool = False,
 ) -> DiscreteModelBridge:
     """Instantiates a Thompson sampling model."""
     if data.df.empty:
         raise ValueError("Thompson sampler requires non-empty data.")
-    return checked_cast(
-        DiscreteModelBridge,
+    return assert_is_instance(
         Models.THOMPSON(
             experiment=experiment,
             data=data,
@@ -218,4 +194,5 @@ def get_thompson(
             uniform_weights=uniform_weights,
             fit_out_of_design=True,
         ),
+        DiscreteModelBridge,
     )

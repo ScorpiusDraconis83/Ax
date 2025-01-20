@@ -47,17 +47,15 @@ from botorch.acquisition.multi_objective.monte_carlo import (
     qExpectedHypervolumeImprovement,
     qNoisyExpectedHypervolumeImprovement,
 )
+from botorch.acquisition.multi_objective.parego import qLogNParEGO
 from botorch.acquisition.preference import AnalyticExpectedUtilityOfBestOption
 from botorch.models import SaasFullyBayesianSingleTaskGP
 from botorch.models.contextual import LCEAGP
 from botorch.models.fully_bayesian_multitask import SaasFullyBayesianMultiTaskGP
 
 # BoTorch `Model` imports
-from botorch.models.gp_regression import FixedNoiseGP, SingleTaskGP
-from botorch.models.gp_regression_fidelity import (
-    FixedNoiseMultiFidelityGP,
-    SingleTaskMultiFidelityGP,
-)
+from botorch.models.gp_regression import SingleTaskGP
+from botorch.models.gp_regression_fidelity import SingleTaskMultiFidelityGP
 from botorch.models.gp_regression_mixed import MixedSingleTaskGP
 from botorch.models.model import Model
 from botorch.models.model_list_gp_regression import ModelListGP
@@ -80,6 +78,7 @@ from botorch.sampling.normal import SobolQMCNormalSampler
 # Miscellaneous BoTorch imports
 from gpytorch.constraints import Interval
 from gpytorch.kernels.kernel import Kernel
+from gpytorch.kernels.linear_kernel import LinearKernel
 from gpytorch.kernels.rbf_kernel import RBFKernel
 from gpytorch.likelihoods.gaussian_likelihood import GaussianLikelihood
 from gpytorch.likelihoods.likelihood import Likelihood
@@ -109,8 +108,6 @@ MODEL_REGISTRY: dict[type[Model], str] = {
     # NOTE: Fixed noise models are deprecated. They point to their
     # supported parent classes, so that we can reap them with minimal
     # concern for backwards compatibility when the time comes.
-    FixedNoiseGP: "SingleTaskGP",
-    FixedNoiseMultiFidelityGP: "SingleTaskMultiFidelityGP",
     MixedSingleTaskGP: "MixedSingleTaskGP",
     ModelListGP: "ModelListGP",
     MultiTaskGP: "MultiTaskGP",
@@ -144,6 +141,7 @@ ACQUISITION_FUNCTION_REGISTRY: dict[type[AcquisitionFunction], str] = {
     qLogNoisyExpectedImprovement: "qLogNoisyExpectedImprovement",
     qLogExpectedHypervolumeImprovement: "qLogExpectedHypervolumeImprovement",
     qLogNoisyExpectedHypervolumeImprovement: "qLogNoisyExpectedHypervolumeImprovement",
+    qLogNParEGO: "qLogNParEGO",
 }
 
 
@@ -157,6 +155,7 @@ MLL_REGISTRY: dict[type[MarginalLogLikelihood], str] = {
 }
 
 KERNEL_REGISTRY: dict[type[Kernel], str] = {
+    LinearKernel: "LinearKernel",
     ScaleMaternKernel: "ScaleMaternKernel",
     RBFKernel: "RBFKernel",
 }

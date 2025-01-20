@@ -14,7 +14,6 @@ from ax.models.torch.utils import (
     get_botorch_objective_and_transform,
 )
 from ax.utils.common.testutils import TestCase
-from ax.utils.common.typeutils import checked_cast, not_none
 from botorch.acquisition.knowledge_gradient import qKnowledgeGradient
 from botorch.acquisition.logei import qLogNoisyExpectedImprovement
 from botorch.acquisition.monte_carlo import qNoisyExpectedImprovement
@@ -34,6 +33,7 @@ from botorch.acquisition.objective import (
 from botorch.acquisition.risk_measures import Expectation
 from botorch.exceptions.errors import BotorchTensorDimensionError
 from botorch.models.model import Model
+from pyre_extensions import assert_is_instance, none_throws
 
 
 class TorchUtilsTest(TestCase):
@@ -68,7 +68,7 @@ class TorchUtilsTest(TestCase):
             fixed_features=fixed_features,
         )
         expected = Xs[0][1:]
-        self.assertEqual(_to_obs_set(expected), _to_obs_set(not_none(X_observed)))
+        self.assertEqual(_to_obs_set(expected), _to_obs_set(none_throws(X_observed)))
 
         # Filter too strict; return unfiltered X_observed
         fixed_features = {0: 1.0}
@@ -79,7 +79,7 @@ class TorchUtilsTest(TestCase):
             fixed_features=fixed_features,
         )
         expected = Xs[0]
-        self.assertEqual(_to_obs_set(expected), _to_obs_set(not_none(X_observed)))
+        self.assertEqual(_to_obs_set(expected), _to_obs_set(none_throws(X_observed)))
 
         # Out of design observations are filtered out
         Xs = [torch.tensor([[2.0, 3.0], [3.0, 4.0]])]
@@ -101,7 +101,7 @@ class TorchUtilsTest(TestCase):
             fit_out_of_design=True,
         )
         expected = Xs[0]
-        self.assertEqual(_to_obs_set(expected), _to_obs_set(not_none(X_observed)))
+        self.assertEqual(_to_obs_set(expected), _to_obs_set(none_throws(X_observed)))
 
     @patch(
         f"{get_botorch_objective_and_transform.__module__}.get_infeasible_cost",
@@ -203,7 +203,7 @@ class TorchUtilsTest(TestCase):
         )
         self.assertTrue(
             torch.allclose(
-                not_none(risk_measure)(torch.tensor([[1.0], [2.0]])),
+                none_throws(risk_measure)(torch.tensor([[1.0], [2.0]])),
                 torch.tensor([-1.5]),
             )
         )
@@ -217,7 +217,7 @@ class TorchUtilsTest(TestCase):
         Y = torch.tensor([[1.0, -1.0, 3.0], [2.0, -2.0, 3.0]])
         self.assertTrue(
             torch.allclose(
-                not_none(risk_measure)(Y),
+                none_throws(risk_measure)(Y),
                 torch.tensor([-3.0]),
             )
         )
@@ -230,7 +230,7 @@ class TorchUtilsTest(TestCase):
         )
         self.assertTrue(
             torch.allclose(
-                not_none(risk_measure)(Y),
+                none_throws(risk_measure)(Y),
                 torch.tensor([-1.5, -3.0]),
             )
         )
@@ -248,7 +248,7 @@ class TorchUtilsTest(TestCase):
             X_observed=torch.ones(2, 2),  # dummy
         )
         mock_set_baseline_Y.assert_called_once()
-        risk_measure = checked_cast(MARS, risk_measure)
+        risk_measure = assert_is_instance(risk_measure, MARS)
         self.assertIsInstance(
             risk_measure.preprocessing_function, WeightedMCMultiOutputObjective
         )
@@ -259,7 +259,7 @@ class TorchUtilsTest(TestCase):
         risk_measure.chebyshev_weights = [0.0, 1.0]
         self.assertTrue(
             torch.allclose(
-                not_none(risk_measure)(Y),
+                none_throws(risk_measure)(Y),
                 torch.tensor([-4.0]),
             )
         )

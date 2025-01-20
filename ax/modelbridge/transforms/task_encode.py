@@ -39,10 +39,10 @@ class TaskChoiceToIntTaskChoice(OrderedChoiceToIntegerRange):
 
     def __init__(
         self,
-        search_space: Optional[SearchSpace] = None,
-        observations: Optional[list[Observation]] = None,
+        search_space: SearchSpace | None = None,
+        observations: list[Observation] | None = None,
         modelbridge: Optional["modelbridge_module.base.ModelBridge"] = None,
-        config: Optional[TConfig] = None,
+        config: TConfig | None = None,
     ) -> None:
         assert (
             search_space is not None
@@ -84,7 +84,7 @@ class TaskChoiceToIntTaskChoice(OrderedChoiceToIntegerRange):
                 transformed_parameters[p_name] = ChoiceParameter(
                     name=p_name,
                     parameter_type=ParameterType.INT,
-                    values=list(range(len(p.values))),  # pyre-ignore [6]
+                    values=list(range(len(p.values))),
                     is_ordered=p.is_ordered,
                     is_task=True,
                     sort_values=True,

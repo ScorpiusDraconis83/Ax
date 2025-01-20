@@ -8,7 +8,6 @@
 
 import os
 import pkgutil
-from typing import Optional
 
 from ax.plot.render import _js_requires, _load_css_resource as _load_plot_css_resource
 from jinja2 import Environment, FunctionLoader
@@ -17,7 +16,6 @@ REPORT_MODULE_NAME = "ax.utils.report"
 
 
 def _load_css_resource() -> str:
-
     resource = pkgutil.get_data(
         REPORT_MODULE_NAME, os.path.join("resources", "report.css")
     )
@@ -30,22 +28,22 @@ REPORT_ELEMENT_TEMPLATE = "simple_template.html"
 
 def p_html(text: str) -> str:
     """Embed text in paragraph tag."""
-    return "<p>{}</p>".format(text)
+    return f"<p>{text}</p>"
 
 
 def h2_html(text: str) -> str:
     """Embed text in subheading tag."""
-    return "<h2>{}</h2>".format(text)
+    return f"<h2>{text}</h2>"
 
 
 def h3_html(text: str) -> str:
     """Embed text in subsubheading tag."""
-    return "<h3>{}</h3>".format(text)
+    return f"<h3>{text}</h3>"
 
 
 def list_item_html(text: str) -> str:
     """Embed text in list element tag."""
-    return "<li>{}</li>".format(text)
+    return f"<li>{text}</li>"
 
 
 def unordered_list_html(list_items: list[str]) -> str:
@@ -55,10 +53,10 @@ def unordered_list_html(list_items: list[str]) -> str:
 
 def link_html(text: str, href: str) -> str:
     """Embed text and reference address into link tag."""
-    return '<a href="{}">{}</a>'.format(href, text)
+    return f'<a href="{href}">{text}</a>'
 
 
-def table_cell_html(text: str, width: Optional[str] = None) -> str:
+def table_cell_html(text: str, width: str | None = None) -> str:
     """Embed text or an HTML element into table cell tag."""
     if width:
         return f"<td width={width}>{text}</td>"
@@ -68,7 +66,7 @@ def table_cell_html(text: str, width: Optional[str] = None) -> str:
 
 def table_heading_cell_html(text: str) -> str:
     """Embed text or an HTML element into table heading cell tag."""
-    return "<th>{}</th>".format(text)
+    return f"<th>{text}</th>"
 
 
 def table_row_html(table_cells: list[str]) -> str:
@@ -138,7 +136,6 @@ def render_report_elements(
 
 
 def _load_html_template(name: str) -> str:
-
     resource = pkgutil.get_data(REPORT_MODULE_NAME, os.path.join("resources", name))
     assert resource is not None
     return resource.decode("utf8")

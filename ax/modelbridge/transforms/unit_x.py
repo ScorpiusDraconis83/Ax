@@ -38,10 +38,10 @@ class UnitX(Transform):
 
     def __init__(
         self,
-        search_space: Optional[SearchSpace] = None,
-        observations: Optional[list[Observation]] = None,
+        search_space: SearchSpace | None = None,
+        observations: list[Observation] | None = None,
         modelbridge: Optional["modelbridge_module.base.ModelBridge"] = None,
-        config: Optional[TConfig] = None,
+        config: TConfig | None = None,
     ) -> None:
         assert search_space is not None, "UnitX requires search space"
         # Identify parameters that should be transformed
@@ -77,7 +77,10 @@ class UnitX(Transform):
                 )
                 if p.target_value is not None:
                     p._target_value = self._normalize_value(
-                        value=p.target_value, bounds=p_bounds  # pyre-ignore [6]
+                        # pyre-fixme[6]: For 1st argument expected `float` but got
+                        #  `Union[bool, float, int, str]`.
+                        value=p.target_value,
+                        bounds=p_bounds,
                     )
         new_constraints: list[ParameterConstraint] = []
         for c in search_space.parameter_constraints:

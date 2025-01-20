@@ -6,11 +6,12 @@
 
 # pyre-strict
 
+import json
 from datetime import datetime
 from enum import Enum
 
 from logging import Logger
-from typing import Any, cast, Optional, Union
+from typing import Any, cast
 
 from ax.analysis.analysis import AnalysisCard
 
@@ -66,7 +67,7 @@ from ax.utils.common.base import Base
 from ax.utils.common.constants import Keys
 from ax.utils.common.logger import get_logger
 from ax.utils.common.serialization import serialize_init_args
-from ax.utils.common.typeutils import checked_cast, not_none
+from pyre_extensions import assert_is_instance, none_throws
 
 logger: Logger = get_logger(__name__)
 
@@ -88,7 +89,7 @@ class Encoder:
     def validate_experiment_metadata(
         cls,
         experiment: Experiment,
-        existing_sqa_experiment_id: Optional[int],
+        existing_sqa_experiment_id: int | None,
     ) -> None:
         """Validates required experiment metadata."""
         if experiment.db_id is not None:
@@ -115,8 +116,8 @@ class Encoder:
                 )
 
     def get_enum_value(
-        self, value: Optional[str], enum: Optional[Union[Enum, type[Enum]]]
-    ) -> Optional[int]:
+        self, value: str | None, enum: Enum | type[Enum] | None
+    ) -> int | None:
         """Given an enum name (string) and an enum (of ints), return the
         corresponding enum value. If the name is not present in the enum,
         throw an error.
@@ -145,6 +146,13 @@ class Encoder:
         create and store copies of the Trials, Metrics, Parameters,
         ParameterConstraints, and Runner owned by this Experiment.
         """
+
+        logger.error(
+            "ATTENTION: The Ax team is considering deprecating SQLAlchemy storage. "
+            "If you are currently using SQLAlchemy storage, please reach out to us "
+            "via GitHub Issues here: https://github.com/facebook/Ax/issues/2975"
+        )
+
         optimization_metrics = self.optimization_config_to_sqa(
             experiment.optimization_config
         )
@@ -160,8 +168,8 @@ class Encoder:
         status_quo_name = None
         status_quo_parameters = None
         if experiment.status_quo is not None:
-            status_quo_name = not_none(experiment.status_quo).name
-            status_quo_parameters = not_none(experiment.status_quo).parameters
+            status_quo_name = none_throws(experiment.status_quo).name
+            status_quo_parameters = none_throws(experiment.status_quo).parameters
 
         trials = []
         for trial in experiment.trials.values():
@@ -188,7 +196,7 @@ class Encoder:
         if isinstance(experiment, MultiTypeExperiment):
             properties[Keys.SUBCLASS] = "MultiTypeExperiment"
             for trial_type, runner in experiment._trial_type_to_runner.items():
-                runner_sqa = self.runner_to_sqa(runner, trial_type)
+                runner_sqa = self.runner_to_sqa(none_throws(runner), trial_type)
                 runners.append(runner_sqa)
 
             for metric in tracking_metrics:
@@ -198,7 +206,7 @@ class Encoder:
                         metric.name
                     ]
         elif experiment.runner:
-            runners.append(self.runner_to_sqa(not_none(experiment.runner)))
+            runners.append(self.runner_to_sqa(none_throws(experiment.runner)))
 
         # pyre-ignore[9]: Expected `Base` for 1st...yping.Type[Experiment]`.
         experiment_class: type[SQAExperiment] = self.config.class_to_sqa_class[
@@ -231,6 +239,12 @@ class Encoder:
         # pyre-fixme[9]: Expected `Base` for 1st...typing.Type[Parameter]`.
         parameter_class: SQAParameter = self.config.class_to_sqa_class[Parameter]
         if isinstance(parameter, RangeParameter):
+            if parameter.logit_scale:
+                raise NotImplementedError(
+                    "Cannot encode logit-scale parameter to SQLAlchemy because "
+                    "the DB schema does not have a corresponding column. "
+                    "Please reach out to the AE team if you need this feature. "
+                )
             # pyre-fixme[29]: `SQAParameter` is not a function.
             return parameter_class(
                 id=parameter.db_id,
@@ -311,7 +325,7 @@ class Encoder:
             )
 
     def search_space_to_sqa(
-        self, search_space: Optional[SearchSpace]
+        self, search_space: SearchSpace | None
     ) -> tuple[list[SQAParameter], list[SQAParameterConstraint]]:
         """Convert Ax SearchSpace to a list of SQLAlchemy Parameters and
         ParameterConstraints.
@@ -488,7 +502,7 @@ class Encoder:
                 )
             )
 
-        return checked_cast(SQAMetric, objective_sqa)
+        return assert_is_instance(objective_sqa, SQAMetric)
 
     def multi_objective_to_sqa(self, multi_objective: MultiObjective) -> SQAMetric:
         """Convert Ax Multi Objective to SQLAlchemy.
@@ -690,7 +704,7 @@ class Encoder:
         )
 
     def optimization_config_to_sqa(
-        self, optimization_config: Optional[OptimizationConfig]
+        self, optimization_config: OptimizationConfig | None
     ) -> list[SQAMetric]:
         """Convert Ax OptimizationConfig to a list of SQLAlchemy Metrics."""
         if optimization_config is None:
@@ -717,7 +731,7 @@ class Encoder:
             metrics_sqa.append(risk_measure_sqa)
         return metrics_sqa
 
-    def arm_to_sqa(self, arm: Arm, weight: Optional[float] = 1.0) -> SQAArm:
+    def arm_to_sqa(self, arm: Arm, weight: float | None = 1.0) -> SQAArm:
         """Convert Ax Arm to SQLAlchemy."""
         # pyre-fixme: Expected `Base` for 1st... got `typing.Type[Arm]`.
         arm_class: SQAArm = self.config.class_to_sqa_class[Arm]
@@ -743,7 +757,7 @@ class Encoder:
     def generator_run_to_sqa(
         self,
         generator_run: GeneratorRun,
-        weight: Optional[float] = None,
+        weight: float | None = None,
         reduced_state: bool = False,
     ) -> SQAGeneratorRun:
         """Convert Ax GeneratorRun to SQLAlchemy.
@@ -852,7 +866,7 @@ class Encoder:
     def generation_strategy_to_sqa(
         self,
         generation_strategy: GenerationStrategy,
-        experiment_id: Optional[int],
+        experiment_id: int | None,
         generator_run_reduced_state: bool = False,
     ) -> SQAGenerationStrategy:
         """Convert an Ax `GenerationStrategy` to SQLAlchemy, preserving its state,
@@ -907,9 +921,7 @@ class Encoder:
         )
         return gs_sqa
 
-    def runner_to_sqa(
-        self, runner: Runner, trial_type: Optional[str] = None
-    ) -> SQARunner:
+    def runner_to_sqa(self, runner: Runner, trial_type: str | None = None) -> SQARunner:
         """Convert Ax Runner to SQLAlchemy."""
         runner_class = type(runner)
         runner_type = self.config.runner_registry.get(runner_class)
@@ -942,7 +954,7 @@ class Encoder:
 
         runner = None
         if trial.runner:
-            runner = self.runner_to_sqa(runner=not_none(trial.runner))
+            runner = self.runner_to_sqa(runner=none_throws(trial.runner))
 
         abandoned_arms = []
         generator_runs = []
@@ -952,7 +964,7 @@ class Encoder:
 
         if isinstance(trial, Trial) and trial.generator_run:
             gr_sqa = self.generator_run_to_sqa(
-                generator_run=not_none(trial.generator_run),
+                generator_run=none_throws(trial.generator_run),
                 reduced_state=generator_run_reduced_state,
             )
             generator_runs.append(gr_sqa)
@@ -1043,7 +1055,7 @@ class Encoder:
         ]
 
     def data_to_sqa(
-        self, data: Data, trial_index: Optional[int], timestamp: int
+        self, data: Data, trial_index: int | None, timestamp: int
     ) -> SQAData:
         """Convert Ax data to SQLAlchemy."""
         # pyre-fixme: Expected `Base` for 1st...ot `typing.Type[Data]`.
@@ -1090,4 +1102,5 @@ class Encoder:
             blob_annotation=analysis_card.blob_annotation,
             time_created=timestamp,
             experiment_id=experiment_id,
+            attributes=json.dumps(analysis_card.attributes),
         )

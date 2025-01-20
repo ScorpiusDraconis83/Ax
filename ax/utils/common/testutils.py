@@ -6,8 +6,7 @@
 
 # pyre-strict
 
-"""Support functions for tests
-"""
+"""Support functions for tests"""
 
 import builtins
 import contextlib
@@ -21,12 +20,12 @@ import sys
 import types
 import unittest
 import warnings
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from contextlib import AbstractContextManager
 from logging import Logger
 from pstats import Stats
-from types import FrameType
-from typing import Any, Callable, Optional, TypeVar, Union
+from types import FrameType, ModuleType
+from typing import Any, TypeVar, Union
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -71,16 +70,16 @@ class _AssertRaisesContextOn(unittest.case._AssertRaisesContext):
        filename: the file in which the error occured
     """
 
-    _expected_line: Optional[str]
-    lineno: Optional[int]
-    filename: Optional[str]
+    _expected_line: str | None
+    lineno: int | None
+    filename: str | None
 
     def __init__(
         self,
         expected: type[Exception],
         test_case: unittest.TestCase,
-        expected_line: Optional[str] = None,
-        expected_regex: Optional[str] = None,
+        expected_line: str | None = None,
+        expected_regex: str | None = None,
     ) -> None:
         self._expected_line = (
             expected_line.strip() if expected_line is not None else None
@@ -95,9 +94,9 @@ class _AssertRaisesContextOn(unittest.case._AssertRaisesContext):
     #  inconsistently.
     def __exit__(
         self,
-        exc_type: Optional[type[Exception]],
-        exc_value: Optional[Exception],
-        tb: Optional[types.TracebackType],
+        exc_type: type[Exception] | None,
+        exc_value: Exception | None,
+        tb: types.TracebackType | None,
     ) -> bool:
         """This is called when the context closes. If an exception was raised
         `exc_type`, `exc_value` and `tb` will be set.
@@ -122,7 +121,6 @@ class _AssertRaisesContextOn(unittest.case._AssertRaisesContext):
 
 # Instead of showing a warning (like in the standard library) we throw an error when
 # deprecated functions are called.
-# pyre-fixme[24]: Generic type `Callable` expects 2 type parameters.
 def _deprecate(original_func: Callable) -> Callable:
     def _deprecated_func(*args: list[Any], **kwargs: dict[str, Any]) -> None:
         raise RuntimeError(
@@ -248,10 +246,22 @@ def _build_comparison_str(
 
 
 def setup_import_mocks(
-    mocked_import_paths: list[str], mock_config_dict: Optional[dict[str, Any]] = None
+    mocked_import_paths: list[str], mock_config_dict: dict[str, Any] | None = None
 ) -> None:
-    # pyre-fixme[3]
-    def custom_import(name: str, *args: Any, **kwargs: Any) -> Any:
+    """This function mocks expensive modules used in tests. It must be called before
+    those modules are imported or it will not work.  Stubbing out these modules
+    will obviously affect the behavior of all tests that use it, so be sure modules
+    being mocked are not important to your test.  It will also mock all child modules.
+
+    Args:
+        mocked_import_paths: List of module paths to mock.
+        mock_config_dict: Dictionary of attributes to mock on the modules being mocked.
+            This is useful if the import is expensive, but there is still some
+            functionality it has the test relies on.  These attributes will be
+            set on all modules being mocked.
+    """
+
+    def custom_import(name: str, *args: Any, **kwargs: Any) -> ModuleType:
         for import_path in mocked_import_paths:
             if name == import_path or name.startswith(f"{import_path}."):
                 mymock = MagicMock()
@@ -267,8 +277,8 @@ def setup_import_mocks(
             raise Exception(f"{import_path} has already been imported!")
 
     # Replace the original import with the custom one
-    # pyre-fixme[61]
-    original_import = builtins.__import__
+    # pyre-fixme[61][53]
+    original_import: Callable[..., ModuleType] = builtins.__import__
     # pyre-fixme[9]: __import__ has type `(name: str, globals: Optional[Mapping[str,
     #  object]] = ..., locals: Optional[Mapping[str, object]] = ..., fromlist:
     #  Sequence[str] = ..., level: int = ...) -> ModuleType`; used as `(name: str,
@@ -282,10 +292,10 @@ class TestCase(fake_filesystem_unittest.TestCase):
     MAX_TEST_SECONDS = 60
     NUMBER_OF_PROFILER_LINES_TO_OUTPUT = 20
     PROFILE_TESTS = False
-    _long_test_active_reason: Optional[str] = None
+    _long_test_active_reason: str | None = None
 
     def __init__(self, methodName: str = "runTest") -> None:
-        def signal_handler(signum: int, frame: Optional[FrameType]) -> None:
+        def signal_handler(signum: int, frame: FrameType | None) -> None:
             message = f"Test took longer than {self.MAX_TEST_SECONDS} seconds."
             if self.PROFILE_TESTS:
                 self._print_profiler_output()
@@ -293,13 +303,15 @@ class TestCase(fake_filesystem_unittest.TestCase):
                 message += (
                     " To see a profiler output, set `TestCase.PROFILE_TESTS` to `True`."
                 )
-
-            if self._long_test_active_reason is None:
+            if hasattr(sys, "gettrace") and sys.gettrace() is not None:
+                # If we're in a debugger session, let the test continue running.
+                return
+            elif self._long_test_active_reason is None:
                 message += (
                     " To specify a reason for a long running test,"
                     + " utilize the @ax_long_test decorator. If your test "
                     + "is long because it's doing modeling, please use the "
-                    + "@fast_botorch_optimize decorator and see if that helps."
+                    + "@mock_botorch_optimize decorator and see if that helps."
                 )
                 raise TimeoutError(message)
             else:
@@ -351,13 +363,18 @@ class TestCase(fake_filesystem_unittest.TestCase):
         # BoTorch input standardization warnings.
         warnings.filterwarnings(
             "ignore",
-            message="Input data is not",
+            message=r"Data \(outcome observations\) is not standardized ",
+            category=InputDataWarning,
+        )
+        warnings.filterwarnings(
+            "ignore",
+            message=r"Data \(input features\) is not",
             category=InputDataWarning,
         )
 
     def run(
-        self, result: Optional[unittest.result.TestResult] = ...
-    ) -> Optional[unittest.result.TestResult]:
+        self, result: unittest.result.TestResult | None = ...
+    ) -> unittest.result.TestResult | None:
         # Arrange for a SIGALRM signal to be delivered to the calling process
         # in specified number of seconds.
         signal.alarm(self.MAX_TEST_SECONDS)
@@ -371,7 +388,7 @@ class TestCase(fake_filesystem_unittest.TestCase):
         self,
         first: Any,  # pyre-ignore[2]
         second: Any,  # pyre-ignore[2]
-        msg: Optional[str] = None,
+        msg: str | None = None,
     ) -> None:
         if isinstance(first, Base) and isinstance(second, Base):
             self.assertAxBaseEqual(first=first, second=second, msg=msg)
@@ -382,7 +399,7 @@ class TestCase(fake_filesystem_unittest.TestCase):
         self,
         first: Base,
         second: Base,
-        msg: Optional[str] = None,
+        msg: str | None = None,
         skip_db_id_check: bool = False,
     ) -> None:
         """Check that two Ax objects that subclass ``Base`` are equal or raise
@@ -422,8 +439,10 @@ class TestCase(fake_filesystem_unittest.TestCase):
     def assertRaisesOn(
         self,
         exc: type[Exception],
-        line: Optional[str] = None,
-        regex: Optional[str] = None,
+        line: str | None = None,
+        regex: str | None = None,
+        # pyre-ignore[24]: Generic type `AbstractContextManager`
+        # expects 2 type parameters, received 1.
     ) -> AbstractContextManager[None]:
         """Assert that an exception is raised on a specific line."""
         context = _AssertRaisesContextOn(exc, self, line, regex)
@@ -465,6 +484,33 @@ class TestCase(fake_filesystem_unittest.TestCase):
             else:
                 self.assertEqual(a_field, b_field, msg=msg)
 
+    def assertIsSubDict(
+        self,
+        subdict: dict[str, Any],
+        superdict: dict[str, Any],
+        almost_equal: bool = False,
+        consider_nans_equal: bool = False,
+    ) -> None:
+        """Testing utility that checks that all keys and values of `subdict` are
+        contained in `dict`.
+
+        Args:
+            subdict: A smaller dictionary.
+            superdict: A larger dictionary which should contain all keys of subdict
+                and the same values as subdict for the corresponding keys.
+        """
+        intersection_dict = {k: superdict[k] for k in subdict if k in superdict}
+        if consider_nans_equal and not almost_equal:
+            raise ValueError(
+                "`consider_nans_equal` can only be used with `almost_equal`"
+            )
+        if almost_equal:
+            self.assertDictsAlmostEqual(
+                subdict, intersection_dict, consider_nans_equal=consider_nans_equal
+            )
+        else:
+            self.assertEqual(subdict, intersection_dict)
+
     @staticmethod
     @contextlib.contextmanager
     def silence_stderr() -> Generator[None, None, None]:
@@ -500,7 +546,7 @@ class TestCase(fake_filesystem_unittest.TestCase):
 
     @classmethod
     @contextlib.contextmanager
-    def ax_long_test(cls, reason: Optional[str]) -> Generator[None, None, None]:
+    def ax_long_test(cls, reason: str | None) -> Generator[None, None, None]:
         cls._long_test_active_reason = reason
         yield
         cls._long_test_active_reason = None

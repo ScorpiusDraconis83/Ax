@@ -10,29 +10,23 @@ from __future__ import annotations
 
 import warnings
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from copy import deepcopy
 from logging import Logger
-from typing import Callable, NamedTuple, Optional
+from typing import NamedTuple
 from warnings import warn
 
 import numpy as np
+import numpy.typing as npt
 from ax.core.observation import Observation, ObservationData, recombine_observations
 from ax.core.optimization_config import OptimizationConfig
 from ax.modelbridge.base import ModelBridge, unwrap_observation_data
 from ax.utils.common.logger import get_logger
 from ax.utils.stats.model_fit_stats import (
-    _correlation_coefficient,
-    _fisher_exact_test_p,
-    _log_likelihood,
-    _mape,
-    _mean_prediction_ci,
-    _mse,
-    _rank_correlation,
-    _total_raw_effect,
-    _wmape,
     coefficient_of_determination,
     compute_model_fit_metrics,
+    DIAGNOSTIC_FNS,
+    FISHER_EXACT_TEST_P,
     mean_of_the_standardized_error,
     ModelFitMetricProtocol,
     std_of_the_standardized_error,
@@ -42,16 +36,6 @@ from botorch.exceptions.warnings import InputDataWarning
 logger: Logger = get_logger(__name__)
 
 CVDiagnostics = dict[str, dict[str, float]]
-
-MEAN_PREDICTION_CI = "Mean prediction CI"
-MAPE = "MAPE"
-wMAPE = "wMAPE"
-TOTAL_RAW_EFFECT = "Total raw effect"
-CORRELATION_COEFFICIENT = "Correlation coefficient"
-RANK_CORRELATION = "Rank correlation"
-FISHER_EXACT_TEST_P = "Fisher exact test p"
-LOG_LIKELIHOOD = "Log likelihood"
-MSE = "MSE"
 
 
 class CVResult(NamedTuple):
@@ -71,8 +55,7 @@ class AssessModelFitResult(NamedTuple):
 def cross_validate(
     model: ModelBridge,
     folds: int = -1,
-    # pyre-fixme[24]: Generic type `Callable` expects 2 type parameters.
-    test_selector: Optional[Callable] = None,
+    test_selector: Callable | None = None,
     untransform: bool = True,
     use_posterior_predictive: bool = False,
 ) -> list[CVResult]:
@@ -184,7 +167,7 @@ def cross_validate(
                 # To avoid confusing users with this warning, we filter it out.
                 warnings.filterwarnings(
                     "ignore",
-                    message=r"Data \(outcome observations\) not standardized",
+                    message=r"Data \(outcome observations\) is not standardized",
                     category=InputDataWarning,
                 )
                 cv_test_predictions = model._cross_validate(
@@ -312,24 +295,16 @@ def compute_diagnostics(result: list[CVResult]) -> CVDiagnostics:
     y_pred = _arrayify_dict_values(y_pred)
     se_pred = _arrayify_dict_values(se_pred)
 
-    diagnostic_fns = {
-        MEAN_PREDICTION_CI: _mean_prediction_ci,
-        MAPE: _mape,
-        wMAPE: _wmape,
-        TOTAL_RAW_EFFECT: _total_raw_effect,
-        CORRELATION_COEFFICIENT: _correlation_coefficient,
-        RANK_CORRELATION: _rank_correlation,
-        FISHER_EXACT_TEST_P: _fisher_exact_test_p,
-        LOG_LIKELIHOOD: _log_likelihood,
-        MSE: _mse,
-    }
     diagnostics = compute_model_fit_metrics(
-        y_obs=y_obs, y_pred=y_pred, se_pred=se_pred, fit_metrics_dict=diagnostic_fns
+        y_obs=y_obs,
+        y_pred=y_pred,
+        se_pred=se_pred,
+        fit_metrics_dict=DIAGNOSTIC_FNS,
     )
     return diagnostics
 
 
-def _arrayify_dict_values(d: dict[str, list[float]]) -> dict[str, np.ndarray]:
+def _arrayify_dict_values(d: dict[str, list[float]]) -> dict[str, npt.NDArray]:
     """Helper to convert dictionary values to numpy arrays."""
     return {k: np.array(v) for k, v in d.items()}
 
@@ -403,7 +378,8 @@ def has_good_opt_config_model_fit(
 
 
 def _gen_train_test_split(
-    folds: int, arm_names: np.ndarray
+    folds: int,
+    arm_names: npt.NDArray,
 ) -> Iterable[tuple[set[str], set[str]]]:
     """Return train/test splits of arm names.
 
@@ -432,7 +408,7 @@ def _gen_train_test_split(
 
 def get_fit_and_std_quality_and_generalization_dict(
     fitted_model_bridge: ModelBridge,
-) -> dict[str, Optional[float]]:
+) -> dict[str, float | None]:
     """
     Get stats and gen from a fitted ModelBridge for analytics purposes.
     """
@@ -471,7 +447,7 @@ def get_fit_and_std_quality_and_generalization_dict(
 
 def compute_model_fit_metrics_from_modelbridge(
     model_bridge: ModelBridge,
-    fit_metrics_dict: Optional[dict[str, ModelFitMetricProtocol]] = None,
+    fit_metrics_dict: dict[str, ModelFitMetricProtocol] | None = None,
     generalization: bool = False,
     untransform: bool = False,
 ) -> dict[str, dict[str, float]]:
@@ -536,7 +512,7 @@ def _model_fit_metric(metric_dict: dict[str, dict[str, float]]) -> float:
     return min(metric_dict["coefficient_of_determination"].values())
 
 
-def _model_std_quality(std: np.ndarray) -> float:
+def _model_std_quality(std: npt.NDArray) -> float:
     """Quantifies quality of the model uncertainty. A value of one means the
     uncertainty is perfectly predictive of the true standard deviation of the error.
     Values larger than one indicate over-estimation and negative values indicate
@@ -563,9 +539,9 @@ def _predict_on_training_data(
     model_bridge: ModelBridge,
     untransform: bool = False,
 ) -> tuple[
-    dict[str, np.ndarray],
-    dict[str, np.ndarray],
-    dict[str, np.ndarray],
+    dict[str, npt.NDArray],
+    dict[str, npt.NDArray],
+    dict[str, npt.NDArray],
 ]:
     """Makes predictions on the training data of a given experiment using a ModelBridge
     and returning the observed values, and the corresponding predictive means and
@@ -627,9 +603,9 @@ def _predict_on_cross_validation_data(
     model_bridge: ModelBridge,
     untransform: bool = False,
 ) -> tuple[
-    dict[str, np.ndarray],
-    dict[str, np.ndarray],
-    dict[str, np.ndarray],
+    dict[str, npt.NDArray],
+    dict[str, npt.NDArray],
+    dict[str, npt.NDArray],
 ]:
     """Makes leave-one-out cross-validation predictions on the training data of the
     ModelBridge and returns the observed values, and the corresponding predictive means

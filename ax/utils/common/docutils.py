@@ -6,11 +6,10 @@
 
 # pyre-strict
 
-"""Support functions for sphinx et. al
-"""
+"""Support functions for sphinx et. al"""
 
-
-from typing import Any, Callable, TypeVar
+from collections.abc import Callable
+from typing import Any, TypeVar
 
 
 _T = TypeVar("_T")

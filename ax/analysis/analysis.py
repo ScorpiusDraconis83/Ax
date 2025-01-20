@@ -5,9 +5,13 @@
 
 # pyre-strict
 
-from enum import Enum
+from __future__ import annotations
+
+import json
+from collections.abc import Iterable
+from enum import IntEnum
 from logging import Logger
-from typing import Optional, Protocol
+from typing import Any, Protocol
 
 import pandas as pd
 from ax.core.experiment import Experiment
@@ -15,16 +19,17 @@ from ax.core.generation_strategy_interface import GenerationStrategyInterface
 from ax.utils.common.base import Base
 from ax.utils.common.logger import get_logger
 from ax.utils.common.result import Err, ExceptionE, Ok, Result
+from IPython.display import display, Markdown
 
 logger: Logger = get_logger(__name__)
 
 
-class AnalysisCardLevel(Enum):
+class AnalysisCardLevel(IntEnum):
     DEBUG = 0
-    LOW = 1
-    MID = 2
-    HIGH = 3
-    CRITICAL = 4
+    LOW = 10
+    MID = 20
+    HIGH = 30
+    CRITICAL = 40
 
 
 class AnalysisCard(Base):
@@ -32,10 +37,14 @@ class AnalysisCard(Base):
     # produced the card. Useful for grouping by when querying a large collection of
     # cards.
     name: str
+    # Arguments passed to the Analysis which produced the card, or their eventual
+    # values if they were inferred.
+    attributes: dict[str, Any]
 
     title: str
     subtitle: str
-    level: AnalysisCardLevel
+
+    level: int
 
     df: pd.DataFrame  # Raw data produced by the Analysis
 
@@ -44,7 +53,6 @@ class AnalysisCard(Base):
     # the blob and presenting it to the user (ex. PlotlyAnalysisCard.get_figure()
     # decodes the blob into a go.Figure object).
     blob: str
-
     # How to interpret the blob (ex. "dataframe", "plotly", "markdown")
     blob_annotation = "dataframe"
 
@@ -53,9 +61,10 @@ class AnalysisCard(Base):
         name: str,
         title: str,
         subtitle: str,
-        level: AnalysisCardLevel,
+        level: int,
         df: pd.DataFrame,
         blob: str,
+        attributes: dict[str, Any] | None = None,
     ) -> None:
         self.name = name
         self.title = title
@@ -63,6 +72,33 @@ class AnalysisCard(Base):
         self.level = level
         self.df = df
         self.blob = blob
+        self.attributes = {} if attributes is None else attributes
+
+    def _ipython_display_(self) -> None:
+        """
+        IPython display hook. This is called when the AnalysisCard is printed in an
+        IPython environment (ex. Jupyter). This method should be implemented by
+        subclasses of Analysis to display the AnalysisCard in a useful way.
+
+        By default, this method displays the raw data in a pandas DataFrame.
+        """
+        display(Markdown(f"## {self.title}\n\n### {self.subtitle}"))
+        display(self.df)
+
+
+def display_cards(
+    cards: Iterable[AnalysisCard], minimum_level: int = AnalysisCardLevel.LOW
+) -> None:
+    """
+    Display a collection of AnalysisCards in IPython environments (ex. Jupyter).
+
+    Args:
+        cards: Collection of AnalysisCards to display.
+        minimum_level: Minimum level of cards to display.
+    """
+    for card in sorted(cards, key=lambda x: x.level, reverse=True):
+        if card.level >= minimum_level:
+            display(card)
 
 
 class Analysis(Protocol):
@@ -86,8 +122,8 @@ class Analysis(Protocol):
 
     def compute(
         self,
-        experiment: Optional[Experiment] = None,
-        generation_strategy: Optional[GenerationStrategyInterface] = None,
+        experiment: Experiment | None = None,
+        generation_strategy: GenerationStrategyInterface | None = None,
     ) -> AnalysisCard:
         # Note: when implementing compute always prefer experiment.lookup_data() to
         # experiment.fetch_data() to avoid unintential data fetching within the report
@@ -96,9 +132,9 @@ class Analysis(Protocol):
 
     def compute_result(
         self,
-        experiment: Optional[Experiment] = None,
-        generation_strategy: Optional[GenerationStrategyInterface] = None,
-    ) -> Result[AnalysisCard, ExceptionE]:
+        experiment: Experiment | None = None,
+        generation_strategy: GenerationStrategyInterface | None = None,
+    ) -> Result[AnalysisCard, AnalysisE]:
         """
         Utility method to compute an AnalysisCard as a Result. This can be useful for
         computing many Analyses at once and handling Exceptions later.
@@ -110,16 +146,66 @@ class Analysis(Protocol):
             )
             return Ok(value=card)
         except Exception as e:
-            logger.error(f"Failed to compute {self}: {e}")
+            logger.error(f"Failed to compute {self.__class__.__name__}: {e}")
 
             return Err(
-                value=ExceptionE(
-                    message=f"Failed to compute {self}",
+                value=AnalysisE(
+                    message=f"Failed to compute {self.__class__.__name__}",
                     exception=e,
+                    analysis=self,
                 )
             )
 
-    def __str__(self) -> str:
-        args = ", ".join([f"{key}={value}" for key, value in self.__dict__.items()])
+    def _create_analysis_card(
+        self,
+        title: str,
+        subtitle: str,
+        level: int,
+        df: pd.DataFrame,
+    ) -> AnalysisCard:
+        """
+        Make an AnalysisCard from this Analysis using provided fields and
+        details about the Analysis class.
+        """
+        return AnalysisCard(
+            name=self.name,
+            attributes=self.attributes,
+            title=title,
+            subtitle=subtitle,
+            level=level,
+            df=df,
+            blob=df.to_json(),
+        )
 
-        return f"{self.__class__.__name__}({args})"
+    @property
+    def name(self) -> str:
+        """The name the AnalysisCard will be given in compute."""
+        return self.__class__.__name__
+
+    @property
+    def attributes(self) -> dict[str, Any]:
+        """The attributes the AnalysisCard will be given in compute."""
+        return self.__dict__
+
+    def __repr__(self) -> str:
+        try:
+            return (
+                f"{self.__class__.__name__}(name={self.name}, "
+                f"attributes={json.dumps(self.attributes)})"
+            )
+        # in case there is logic in name or attributes that throws a json error
+        except Exception:
+            return self.__class__.__name__
+
+
+class AnalysisE(ExceptionE):
+    analysis: Analysis
+
+    def __init__(
+        self,
+        message: str,
+        exception: Exception,
+        analysis: Analysis,
+    ) -> None:
+        super().__init__(message, exception)
+        self.analysis = analysis

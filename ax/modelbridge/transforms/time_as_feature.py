@@ -6,6 +6,8 @@
 
 # pyre-strict
 
+from __future__ import annotations
+
 from logging import Logger
 from time import time
 from typing import Optional, TYPE_CHECKING
@@ -20,7 +22,7 @@ from ax.modelbridge.transforms.base import Transform
 from ax.models.types import TConfig
 from ax.utils.common.logger import get_logger
 from ax.utils.common.timeutils import unixtime_to_pandas_ts
-from ax.utils.common.typeutils import checked_cast, not_none
+from pyre_extensions import assert_is_instance, none_throws
 
 if TYPE_CHECKING:
     # import as module to make sphinx-autodoc-typehints happy
@@ -44,10 +46,10 @@ class TimeAsFeature(Transform):
 
     def __init__(
         self,
-        search_space: Optional[SearchSpace] = None,
-        observations: Optional[list[Observation]] = None,
+        search_space: SearchSpace | None = None,
+        observations: list[Observation] | None = None,
         modelbridge: Optional["modelbridge_module.base.ModelBridge"] = None,
-        config: Optional[TConfig] = None,
+        config: TConfig | None = None,
     ) -> None:
         assert observations is not None, "TimeAsFeature requires observations"
         if isinstance(search_space, RobustSearchSpace):
@@ -66,7 +68,7 @@ class TimeAsFeature(Transform):
                     "Unable to use TimeAsFeature since not all observations have "
                     "start time specified."
                 )
-            start_time = not_none(obsf.start_time).timestamp()
+            start_time = none_throws(obsf.start_time).timestamp()
             self.min_start_time = min(self.min_start_time, start_time)
             self.max_start_time = max(self.max_start_time, start_time)
             duration = self._get_duration(start_time=start_time, end_time=obsf.end_time)
@@ -77,9 +79,7 @@ class TimeAsFeature(Transform):
                 # no need to case-distinguish during normalization
                 self.duration_range = 1.0
 
-    def _get_duration(
-        self, start_time: float, end_time: Optional[pd.Timestamp]
-    ) -> float:
+    def _get_duration(self, start_time: float, end_time: pd.Timestamp | None) -> float:
         return (
             self.current_time if end_time is None else end_time.timestamp()
         ) - start_time
@@ -138,12 +138,14 @@ class TimeAsFeature(Transform):
         self, observation_features: list[ObservationFeatures]
     ) -> list[ObservationFeatures]:
         for obsf in observation_features:
-            start_time = checked_cast(float, obsf.parameters.pop("start_time"))
-            obsf.start_time = unixtime_to_pandas_ts(start_time)
-            obsf.end_time = unixtime_to_pandas_ts(
-                checked_cast(float, obsf.parameters.pop("duration"))
-                * self.duration_range
-                + self.min_duration
-                + start_time
-            )
+            start_time = obsf.parameters.pop("start_time", None)
+            duration = obsf.parameters.pop("duration", None)
+            if start_time is not None:
+                start_time = assert_is_instance(start_time, float)
+                obsf.start_time = unixtime_to_pandas_ts(start_time)
+                if duration is not None:
+                    duration = assert_is_instance(duration, float)
+                    obsf.end_time = unixtime_to_pandas_ts(
+                        duration * self.duration_range + self.min_duration + start_time
+                    )
         return observation_features

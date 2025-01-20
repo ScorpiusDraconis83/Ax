@@ -41,10 +41,10 @@ class MetricsAsTask(Transform):
 
     def __init__(
         self,
-        search_space: Optional[SearchSpace] = None,
-        observations: Optional[list[Observation]] = None,
+        search_space: SearchSpace | None = None,
+        observations: list[Observation] | None = None,
         modelbridge: Optional["modelbridge_module.base.ModelBridge"] = None,
-        config: Optional[TConfig] = None,
+        config: TConfig | None = None,
     ) -> None:
         # Use config to specify metric task map
         if config is None or "metric_task_map" not in config:
@@ -81,7 +81,7 @@ class MetricsAsTask(Transform):
                     new_obs_feats = obs.features.clone(replace_parameters=params)
                     new_obs_data = ObservationData(
                         metric_names=target_metrics,
-                        means=obs.data.means_dict[task_metric]  # pyre-ignore
+                        means=obs.data.means_dict[task_metric]
                         * np.ones(len(target_metrics)),
                         covariance=np.diag(
                             obs.data.covariance_matrix[task_metric][task_metric]

@@ -8,9 +8,8 @@
 
 from __future__ import annotations
 
-from typing import Optional
-
 import numpy as np
+import numpy.typing as npt
 import torch
 from ax.core.search_space import SearchSpaceDigest
 from ax.core.types import TCandidateMetadata
@@ -38,9 +37,7 @@ class RandomForest(TorchModel):
         num_trees: Number of trees.
     """
 
-    def __init__(
-        self, max_features: Optional[str] = "sqrt", num_trees: int = 500
-    ) -> None:
+    def __init__(self, max_features: str | None = "sqrt", num_trees: int = 500) -> None:
         self.max_features = max_features
         self.num_trees = num_trees
         self.models: list[RandomForestRegressor] = []
@@ -50,7 +47,7 @@ class RandomForest(TorchModel):
         self,
         datasets: list[SupervisedDataset],
         search_space_digest: SearchSpaceDigest,
-        candidate_metadata: Optional[list[list[TCandidateMetadata]]] = None,
+        candidate_metadata: list[list[TCandidateMetadata]] | None = None,
     ) -> None:
         Xs, Ys, Yvars = _datasets_to_legacy_inputs(datasets=datasets)
         for X, Y, Yvar in zip(Xs, Ys, Yvars):
@@ -91,11 +88,11 @@ class RandomForest(TorchModel):
 
 
 def _get_rf(
-    X: np.ndarray,
-    Y: np.ndarray,
-    Yvar: np.ndarray,
+    X: npt.NDArray,
+    Y: npt.NDArray,
+    Yvar: npt.NDArray,
     num_trees: int,
-    max_features: Optional[str],
+    max_features: str | None,
 ) -> RandomForestRegressor:
     """Fit a Random Forest model.
 

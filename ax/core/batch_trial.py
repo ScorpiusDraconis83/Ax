@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from logging import Logger
-from typing import Optional, TYPE_CHECKING, Union
+from typing import TYPE_CHECKING
 
 import numpy as np
 from ax.core.arm import Arm
@@ -34,7 +34,7 @@ from ax.utils.common.base import SortableBase
 from ax.utils.common.docutils import copy_doc
 from ax.utils.common.equality import datetime_equals, equality_typechecker
 from ax.utils.common.logger import _round_floats_for_logging, get_logger
-from ax.utils.common.typeutils import checked_cast, not_none
+from pyre_extensions import assert_is_instance, none_throws
 
 logger: Logger = get_logger(__name__)
 
@@ -64,7 +64,7 @@ class AbandonedArm(SortableBase):
 
     name: str
     time: datetime
-    reason: Optional[str] = None
+    reason: str | None = None
 
     @equality_typechecker
     def __eq__(self, other: AbandonedArm) -> bool:
@@ -137,13 +137,13 @@ class BatchTrial(BaseTrial):
     def __init__(
         self,
         experiment: core.experiment.Experiment,
-        generator_run: Optional[GeneratorRun] = None,
-        generator_runs: Optional[list[GeneratorRun]] = None,
-        trial_type: Optional[str] = None,
-        optimize_for_power: Optional[bool] = False,
-        ttl_seconds: Optional[int] = None,
-        index: Optional[int] = None,
-        lifecycle_stage: Optional[LifecycleStage] = None,
+        generator_run: GeneratorRun | None = None,
+        generator_runs: list[GeneratorRun] | None = None,
+        trial_type: str | None = None,
+        optimize_for_power: bool | None = False,
+        ttl_seconds: int | None = None,
+        index: int | None = None,
+        lifecycle_stage: LifecycleStage | None = None,
     ) -> None:
         super().__init__(
             experiment=experiment,
@@ -154,8 +154,8 @@ class BatchTrial(BaseTrial):
         self._arms_by_name: dict[str, Arm] = {}
         self._generator_run_structs: list[GeneratorRunStruct] = []
         self._abandoned_arms_metadata: dict[str, AbandonedArm] = {}
-        self._status_quo: Optional[Arm] = None
-        self._status_quo_weight_override: Optional[float] = None
+        self._status_quo: Arm | None = None
+        self._status_quo_weight_override: float | None = None
         if generator_run is not None:
             if generator_runs is not None:
                 raise UnsupportedError(
@@ -182,8 +182,8 @@ class BatchTrial(BaseTrial):
         # Trial status quos are stored in the DB as a generator run
         # with one arm; thus we need to store two `db_id` values
         # for this object instead of one
-        self._status_quo_generator_run_db_id: Optional[int] = None
-        self._status_quo_arm_db_id: Optional[int] = None
+        self._status_quo_generator_run_db_id: int | None = None
+        self._status_quo_arm_db_id: int | None = None
         self._lifecycle_stage = lifecycle_stage
 
     @property
@@ -230,7 +230,7 @@ class BatchTrial(BaseTrial):
         return arm_weights
 
     @property
-    def lifecycle_stage(self) -> Optional[LifecycleStage]:
+    def lifecycle_stage(self) -> LifecycleStage | None:
         return self._lifecycle_stage
 
     @arm_weights.setter
@@ -254,7 +254,7 @@ class BatchTrial(BaseTrial):
     def add_arms_and_weights(
         self,
         arms: list[Arm],
-        weights: Optional[list[float]] = None,
+        weights: list[float] | None = None,
         multiplier: float = 1.0,
     ) -> BatchTrial:
         """Add arms and weights to the trial.
@@ -317,7 +317,9 @@ class BatchTrial(BaseTrial):
         generator_run.index = len(self._generator_run_structs) - 1
 
         if self.status_quo is not None and self.optimize_for_power:
-            self.set_status_quo_and_optimize_power(status_quo=not_none(self.status_quo))
+            self.set_status_quo_and_optimize_power(
+                status_quo=none_throws(self.status_quo)
+            )
 
         if generator_run._generation_step_index is not None:
             self._set_generation_step_index(
@@ -327,12 +329,12 @@ class BatchTrial(BaseTrial):
         return self
 
     @property
-    def status_quo(self) -> Optional[Arm]:
+    def status_quo(self) -> Arm | None:
         """The control arm for this batch."""
         return self._status_quo
 
     @status_quo.setter
-    def status_quo(self, status_quo: Optional[Arm]) -> None:
+    def status_quo(self, status_quo: Arm | None) -> None:
         raise NotImplementedError(
             "Use `set_status_quo_with_weight` or "
             "`set_status_quo_and_optimize_power` "
@@ -347,7 +349,7 @@ class BatchTrial(BaseTrial):
 
     @immutable_once_run
     def set_status_quo_with_weight(
-        self, status_quo: Arm, weight: Optional[float]
+        self, status_quo: Arm, weight: float | None
     ) -> BatchTrial:
         """Sets status quo arm with given weight. This weight *overrides* any
         weight the status quo has from generator runs attached to this batch.
@@ -366,7 +368,9 @@ class BatchTrial(BaseTrial):
                 status_quo.parameters, raise_error=True
             )
             self.experiment._name_and_store_arm_if_not_exists(
-                arm=status_quo, proposed_name="status_quo_" + str(self.index)
+                arm=status_quo,
+                proposed_name="status_quo_" + str(self.index),
+                replace=True,
             )
         self._status_quo = status_quo.clone() if status_quo is not None else None
         self._status_quo_weight_override = weight
@@ -401,7 +405,7 @@ class BatchTrial(BaseTrial):
             return self
 
         # arm_weights should always have at least one arm now
-        arm_weights = not_none(self.arm_weights)
+        arm_weights = none_throws(self.arm_weights)
         sum_weights = sum(w for arm, w in arm_weights.items() if arm != status_quo)
         optimal_status_quo_weight_override = np.sqrt(sum_weights)
         self.set_status_quo_with_weight(
@@ -475,20 +479,23 @@ class BatchTrial(BaseTrial):
         sufficient_factors = all(len(arm.parameters or []) >= 2 for arm in self.arms)
         if not sufficient_factors:
             return False
-        param_levels: defaultdict[str, dict[Union[str, float], int]] = defaultdict(dict)
+        param_levels: defaultdict[str, dict[str | float, int]] = defaultdict(dict)
         for arm in self.arms:
             for param_name, param_value in arm.parameters.items():
-                param_levels[param_name][not_none(param_value)] = 1
+                param_levels[param_name][none_throws(param_value)] = 1
         param_cardinality = 1
         for param_values in param_levels.values():
             param_cardinality *= len(param_values)
         return len(self.arms) == param_cardinality
 
     def run(self) -> BatchTrial:
-        return checked_cast(BatchTrial, super().run())
+        return assert_is_instance(
+            super().run(),
+            BatchTrial,
+        )
 
     def normalized_arm_weights(
-        self, total: float = 1, trunc_digits: Optional[int] = None
+        self, total: float = 1, trunc_digits: int | None = None
     ) -> MutableMapping[Arm, float]:
         """Returns arms with a new set of weights normalized
         to the given total.
@@ -512,7 +519,6 @@ class BatchTrial(BaseTrial):
         weights = np.array(self.weights)
         if trunc_digits is not None:
             atomic_weight = 10**-trunc_digits
-            # pyre-fixme[16]: `float` has no attribute `astype`.
             int_weights = (
                 (total / atomic_weight) * (weights / np.sum(weights))
             ).astype(int)
@@ -524,7 +530,7 @@ class BatchTrial(BaseTrial):
         return OrderedDict(zip(self.arms, weights))
 
     def mark_arm_abandoned(
-        self, arm_name: str, reason: Optional[str] = None
+        self, arm_name: str, reason: str | None = None
     ) -> BatchTrial:
         """Mark a arm abandoned.
 
@@ -562,8 +568,9 @@ class BatchTrial(BaseTrial):
 
     def clone_to(
         self,
-        experiment: Optional[core.experiment.Experiment] = None,
+        experiment: core.experiment.Experiment | None = None,
         include_sq: bool = True,
+        clear_trial_type: bool = False,
     ) -> BatchTrial:
         """Clone the trial and attach it to a specified experiment.
         If None provided, attach it to the current experiment.
@@ -572,6 +579,7 @@ class BatchTrial(BaseTrial):
             experiment: The experiment to which the cloned trial will belong.
                 If unspecified, uses the current experiment.
             include_sq: Whether to include status quo in the cloned trial.
+            clear_trial_type: Whether to clear the trial type of the cloned trial.
 
         Returns:
             A new instance of the trial.
@@ -579,7 +587,8 @@ class BatchTrial(BaseTrial):
         use_old_experiment = experiment is None
         experiment = self._experiment if experiment is None else experiment
         new_trial = experiment.new_batch_trial(
-            trial_type=self._trial_type, ttl_seconds=self._ttl_seconds
+            trial_type=None if clear_trial_type else self._trial_type,
+            ttl_seconds=self._ttl_seconds,
         )
         for struct in self._generator_run_structs:
             if use_old_experiment:
@@ -601,8 +610,8 @@ class BatchTrial(BaseTrial):
     def attach_batch_trial_data(
         self,
         raw_data: dict[str, TEvaluationOutcome],
-        sample_sizes: Optional[dict[str, int]] = None,
-        metadata: Optional[dict[str, Union[str, int]]] = None,
+        sample_sizes: dict[str, int] | None = None,
+        metadata: dict[str, str | int] | None = None,
     ) -> None:
         """Attaches data to the trial
 
@@ -700,7 +709,7 @@ class BatchTrial(BaseTrial):
         for gr_struct in self._generator_run_structs:
             gr = gr_struct.generator_run
             if gr and gr.candidate_metadata_by_arm_signature and arm in gr.arms:
-                return not_none(gr.candidate_metadata_by_arm_signature).get(
+                return none_throws(gr.candidate_metadata_by_arm_signature).get(
                     arm.signature
                 )
         return None
@@ -709,8 +718,8 @@ class BatchTrial(BaseTrial):
         """Utility function to validate batch data before further processing."""
         if (
             self.status_quo
-            and not_none(self.status_quo).name in self.arms_by_name
-            and not_none(self.status_quo).name not in data.df["arm_name"].values
+            and none_throws(self.status_quo).name in self.arms_by_name
+            and none_throws(self.status_quo).name not in data.df["arm_name"].values
         ):
             raise AxError(
                 f"Trial #{self.index} was completed with data that did "

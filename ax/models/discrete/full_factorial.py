@@ -8,11 +8,11 @@
 
 import itertools
 import logging
+from collections.abc import Sequence
 from functools import reduce
 from operator import mul
-from typing import Optional
 
-import numpy as np
+import numpy.typing as npt
 from ax.core.types import TGenMetadata, TParamValue, TParamValueList
 from ax.models.discrete_base import DiscreteModel
 from ax.models.types import TConfig
@@ -49,24 +49,27 @@ class FullFactorialGenerator(DiscreteModel):
         self.check_cardinality = check_cardinality
 
     @copy_doc(DiscreteModel.gen)
+    # pyre-fixme[15]: Inconsistent override in return
     def gen(
         self,
         n: int,
-        parameter_values: list[TParamValueList],
-        objective_weights: Optional[np.ndarray],
-        outcome_constraints: Optional[tuple[np.ndarray, np.ndarray]] = None,
-        fixed_features: Optional[dict[int, TParamValue]] = None,
-        pending_observations: Optional[list[list[TParamValueList]]] = None,
-        model_gen_options: Optional[TConfig] = None,
+        parameter_values: Sequence[Sequence[TParamValue]],
+        objective_weights: npt.NDArray | None,
+        outcome_constraints: tuple[npt.NDArray, npt.NDArray] | None = None,
+        fixed_features: dict[int, TParamValue] | None = None,
+        pending_observations: Sequence[Sequence[Sequence[TParamValue]]] | None = None,
+        model_gen_options: TConfig | None = None,
     ) -> tuple[list[TParamValueList], list[float], TGenMetadata]:
         if n != -1:
-            raise ValueError(
+            logger.warning(
                 "FullFactorialGenerator will ignore the specified value of n. "
                 "The generator automatically determines how many arms to "
                 "generate."
             )
 
         if fixed_features:
+            # Make a copy so as to not mutate it
+            parameter_values = list(parameter_values)
             for fixed_feature_index, fixed_feature_value in fixed_features.items():
                 parameter_values[fixed_feature_index] = [fixed_feature_value]
 

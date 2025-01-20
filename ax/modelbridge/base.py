@@ -16,7 +16,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 
 from logging import Logger
-from typing import Any, Optional
+from typing import Any
 
 from ax.core.arm import Arm
 from ax.core.base_trial import NON_ABANDONED_STATUSES, TrialStatus
@@ -34,14 +34,22 @@ from ax.core.observation import (
 from ax.core.optimization_config import OptimizationConfig
 from ax.core.parameter import ParameterType, RangeParameter
 from ax.core.search_space import SearchSpace
-from ax.core.types import TCandidateMetadata, TModelCov, TModelMean, TModelPredict
+from ax.core.types import (
+    TCandidateMetadata,
+    TModelCov,
+    TModelMean,
+    TModelPredict,
+    TParameterization,
+)
 from ax.exceptions.core import UnsupportedError, UserInputError
+from ax.exceptions.model import ModelBridgeMethodNotImplementedError
 from ax.modelbridge.transforms.base import Transform
 from ax.modelbridge.transforms.cast import Cast
+from ax.modelbridge.transforms.fill_missing_parameters import FillMissingParameters
 from ax.models.types import TConfig
 from ax.utils.common.logger import get_logger
-from ax.utils.common.typeutils import checked_cast, not_none
 from botorch.exceptions.warnings import InputDataWarning
+from pyre_extensions import assert_is_instance, none_throws
 
 logger: Logger = get_logger(__name__)
 
@@ -49,16 +57,16 @@ logger: Logger = get_logger(__name__)
 @dataclass(frozen=True)
 class BaseGenArgs:
     search_space: SearchSpace
-    optimization_config: Optional[OptimizationConfig]
+    optimization_config: OptimizationConfig | None
     pending_observations: dict[str, list[ObservationFeatures]]
-    fixed_features: Optional[ObservationFeatures]
+    fixed_features: ObservationFeatures | None
 
 
 @dataclass(frozen=True)
 class GenResults:
     observation_features: list[ObservationFeatures]
     weights: list[float]
-    best_observation_features: Optional[ObservationFeatures] = None
+    best_observation_features: ObservationFeatures | None = None
     gen_metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -92,13 +100,14 @@ class ModelBridge(ABC):  # noqa: B024 -- ModelBridge doesn't have any abstract m
         search_space: SearchSpace,
         # pyre-fixme[2]: Parameter annotation cannot be `Any`.
         model: Any,
-        transforms: Optional[list[type[Transform]]] = None,
-        experiment: Optional[Experiment] = None,
-        data: Optional[Data] = None,
-        transform_configs: Optional[dict[str, TConfig]] = None,
-        status_quo_name: Optional[str] = None,
-        status_quo_features: Optional[ObservationFeatures] = None,
-        optimization_config: Optional[OptimizationConfig] = None,
+        transforms: list[type[Transform]] | None = None,
+        experiment: Experiment | None = None,
+        data: Data | None = None,
+        transform_configs: dict[str, TConfig] | None = None,
+        status_quo_name: str | None = None,
+        status_quo_features: ObservationFeatures | None = None,
+        optimization_config: OptimizationConfig | None = None,
+        expand_model_space: bool = True,
         fit_out_of_design: bool = False,
         fit_abandoned: bool = False,
         fit_tracking_metrics: bool = True,
@@ -110,7 +119,9 @@ class ModelBridge(ABC):  # noqa: B024 -- ModelBridge doesn't have any abstract m
         Args:
             experiment: Is used to get arm parameters. Is not mutated.
             search_space: Search space for fitting the model. Constraints need
-                not be the same ones used in gen.
+                not be the same ones used in gen. RangeParameter bounds are
+                considered soft and will be expanded to match the range of the
+                data sent in for fitting, if expand_model_space is True.
             data: Ax Data.
             model: Interface will be specified in subclass. If model requires
                 initialization, that should be done prior to its use here.
@@ -126,8 +137,12 @@ class ModelBridge(ABC):  # noqa: B024 -- ModelBridge doesn't have any abstract m
                 Either this or status_quo_name should be specified, not both.
             optimization_config: Optimization config defining how to optimize
                 the model.
-            fit_out_of_design: If specified, all training data is returned.
-                Otherwise, only in design points are returned.
+            expand_model_space: If True, expand range parameter bounds in model
+                space to cover given training data. This will make the modeling
+                space larger than the search space if training data fall outside
+                the search space.
+            fit_out_of_design: If specified, all training data are used.
+                Otherwise, only in design points are used.
             fit_abandoned: Whether data for abandoned arms or trials should be
                 included in model training data. If ``False``, only
                 non-abandoned points are returned.
@@ -144,25 +159,28 @@ class ModelBridge(ABC):  # noqa: B024 -- ModelBridge doesn't have any abstract m
         """
         t_fit_start = time.monotonic()
         transforms = transforms or []
-        # pyre-ignore: Cast is a Tranform
-        transforms: list[type[Transform]] = [Cast] + transforms
+        transforms = [Cast] + transforms
 
         self.fit_time: float = 0.0
         self.fit_time_since_gen: float = 0.0
         self._metric_names: set[str] = set()
         self._training_data: list[Observation] = []
-        self._optimization_config: Optional[OptimizationConfig] = optimization_config
+        self._optimization_config: OptimizationConfig | None = optimization_config
         self._training_in_design: list[bool] = []
-        self._status_quo: Optional[Observation] = None
-        self._status_quo_name: Optional[str] = None
-        self._arms_by_signature: Optional[dict[str, Arm]] = None
+        self._status_quo: Observation | None = None
+        self._status_quo_name: str | None = None
+        self._arms_by_signature: dict[str, Arm] | None = None
         self.transforms: MutableMapping[str, Transform] = OrderedDict()
-        self._model_key: Optional[str] = None
-        self._model_kwargs: Optional[dict[str, Any]] = None
-        self._bridge_kwargs: Optional[dict[str, Any]] = None
+        self._model_key: str | None = None
+        self._model_kwargs: dict[str, Any] | None = None
+        self._bridge_kwargs: dict[str, Any] | None = None
+        # The space used for optimization.
+        self._search_space: SearchSpace = search_space.clone()
+        # The space used for modeling. Might be larger than the optimization
+        # space to cover training data.
         self._model_space: SearchSpace = search_space.clone()
         self._raw_transforms = transforms
-        self._transform_configs: Optional[dict[str, TConfig]] = transform_configs
+        self._transform_configs: dict[str, TConfig] | None = transform_configs
         self._fit_out_of_design = fit_out_of_design
         self._fit_abandoned = fit_abandoned
         self._fit_tracking_metrics = fit_tracking_metrics
@@ -171,6 +189,7 @@ class ModelBridge(ABC):  # noqa: B024 -- ModelBridge doesn't have any abstract m
             experiment is not None and experiment.immutable_search_space_and_opt_config
         )
         self._experiment_properties: dict[str, Any] = {}
+        self._experiment: Experiment | None = experiment
 
         if experiment is not None:
             if self._optimization_config is None:
@@ -189,6 +208,8 @@ class ModelBridge(ABC):  # noqa: B024 -- ModelBridge doesn't have any abstract m
         # Set training data (in the raw / untransformed space). This also omits
         # out-of-design and abandoned observations depending on the corresponding flags.
         observations_raw = self._prepare_observations(experiment=experiment, data=data)
+        if expand_model_space:
+            self._set_model_space(observations=observations_raw)
         observations_raw = self._set_training_data(
             observations=observations_raw, search_space=self._model_space
         )
@@ -241,13 +262,13 @@ class ModelBridge(ABC):  # noqa: B024 -- ModelBridge doesn't have any abstract m
             increment = time.monotonic() - t_fit_start + time_so_far
             self.fit_time += increment
             self.fit_time_since_gen += increment
-        except NotImplementedError:
+        except ModelBridgeMethodNotImplementedError:
             pass
 
     def _process_and_transform_data(
         self,
-        experiment: Optional[Experiment] = None,
-        data: Optional[Data] = None,
+        experiment: Experiment | None = None,
+        data: Data | None = None,
     ) -> tuple[list[Observation], SearchSpace]:
         r"""Processes the data into observations and returns transformed
         observations and the search space. This packages the following methods:
@@ -267,7 +288,7 @@ class ModelBridge(ABC):  # noqa: B024 -- ModelBridge doesn't have any abstract m
         )
 
     def _prepare_observations(
-        self, experiment: Optional[Experiment], data: Optional[Data]
+        self, experiment: Experiment | None, data: Data | None
     ) -> list[Observation]:
         if experiment is None or data is None:
             return []
@@ -282,8 +303,8 @@ class ModelBridge(ABC):  # noqa: B024 -- ModelBridge doesn't have any abstract m
         self,
         observations: list[Observation],
         search_space: SearchSpace,
-        transforms: Optional[list[type[Transform]]],
-        transform_configs: Optional[dict[str, TConfig]],
+        transforms: list[type[Transform]] | None,
+        transform_configs: dict[str, TConfig] | None,
         assign_transforms: bool = True,
     ) -> tuple[list[Observation], SearchSpace]:
         """Initialize transforms and apply them to provided data."""
@@ -363,16 +384,60 @@ class ModelBridge(ABC):  # noqa: B024 -- ModelBridge doesn't have any abstract m
         search_space: SearchSpace,
         observations: list[Observation],
     ) -> list[bool]:
+        """Compute in-design status for each observation, after filling missing
+        values if FillMissingParameters transform is used."""
+        observation_features = [obs.features for obs in observations]
+        if (
+            self._transform_configs is not None
+            and "FillMissingParameters" in self._transform_configs
+        ):
+            t = FillMissingParameters(
+                config=self._transform_configs["FillMissingParameters"]
+            )
+            observation_features = t.transform_observation_features(
+                deepcopy(observation_features)
+            )
         return [
-            search_space.check_membership(obs.features.parameters)
-            for obs in observations
+            search_space.check_membership(obsf.parameters)
+            for obsf in observation_features
         ]
+
+    def _set_model_space(self, observations: list[Observation]) -> None:
+        """Set model space, possibly expanding range parameters to cover data."""
+        # If fill for missing values, include those in expansion.
+        fill_values: TParameterization | None = None
+        if (
+            self._transform_configs is not None
+            and "FillMissingParameters" in self._transform_configs
+        ):
+            fill_values = self._transform_configs[  # pyre-ignore[9]
+                "FillMissingParameters"
+            ].get("fill_values", None)
+        # Extract parameter values across arms
+        parameter_dicts = [obs.features.parameters for obs in observations]
+        if fill_values is not None:
+            parameter_dicts.append(fill_values)
+        param_vals = {p_name: [] for p_name in self._model_space.parameters.keys()}
+        for parameter_dict in parameter_dicts:
+            for p_name in self._model_space.parameters.keys():
+                p_val = parameter_dict.get(p_name, None)
+                if p_val is not None:
+                    param_vals[p_name].append(p_val)
+
+        # Update model space. Expand bounds as needed to cover the values found
+        # in the data.
+        for p in self._model_space.parameters.values():
+            if len(param_vals[p.name]) == 0:
+                continue
+            if isinstance(p, RangeParameter):
+                p.lower = min(p.lower, min(param_vals[p.name]))
+                p.upper = max(p.upper, max(param_vals[p.name]))
 
     def _set_status_quo(
         self,
-        experiment: Optional[Experiment],
-        status_quo_name: Optional[str],
-        status_quo_features: Optional[ObservationFeatures],
+        experiment: Experiment | None,
+        status_quo_name: str | None,
+        status_quo_features: ObservationFeatures | None,
     ) -> None:
         """Set model status quo by matching status_quo_name or status_quo_features.
 
@@ -386,7 +451,7 @@ class ModelBridge(ABC):  # noqa: B024 -- ModelBridge doesn't have any abstract m
             status_quo_name: Name of status quo arm.
             status_quo_features: Features for status quo.
         """
-        self._status_quo: Optional[Observation] = None
+        self._status_quo: Observation | None = None
         sq_obs = None
 
         if (
@@ -434,7 +499,7 @@ class ModelBridge(ABC):  # noqa: B024 -- ModelBridge doesn't have any abstract m
                     self._status_quo = sq_obs[0]
 
     @property
-    def status_quo_data_by_trial(self) -> Optional[dict[int, ObservationData]]:
+    def status_quo_data_by_trial(self) -> dict[int, ObservationData] | None:
         """A map of trial index to the status quo observation data of each trial"""
         return _get_status_quo_by_trial(
             observations=self._training_data,
@@ -449,9 +514,17 @@ class ModelBridge(ABC):  # noqa: B024 -- ModelBridge doesn't have any abstract m
         )
 
     @property
-    def status_quo(self) -> Optional[Observation]:
+    def status_quo(self) -> Observation | None:
         """Observation corresponding to status quo, if any."""
         return self._status_quo
+
+    @property
+    def status_quo_name(self) -> str | None:
+        """Name of status quo, if any."""
+        if self._status_quo is not None:
+            if self._status_quo.arm_name is not None:
+                return self._status_quo.arm_name
+        return self._status_quo_name
 
     @property
     def metric_names(self) -> set[str]:
@@ -511,7 +584,9 @@ class ModelBridge(ABC):  # noqa: B024 -- ModelBridge doesn't have any abstract m
         observations: list[Observation],
     ) -> None:
         """Apply terminal transform and fit model."""
-        raise NotImplementedError
+        raise ModelBridgeMethodNotImplementedError(
+            f"{self.__class__.__name__} does not implement `_fit`."
+        )
 
     def _batch_predict(
         self, observation_features: list[ObservationFeatures]
@@ -619,6 +694,14 @@ class ModelBridge(ABC):  # noqa: B024 -- ModelBridge doesn't have any abstract m
             - Nested dictionary with cov['metric1']['metric2'] a list of
               cov(metric1@x, metric2@x) for x in observation_features.
         """
+        # Make sure that input is a list of ObservationFeatures. If you pass in
+        # arms, the code runs but it doesn't apply the transforms.
+        if not all(
+            isinstance(obsf, ObservationFeatures) for obsf in observation_features
+        ):
+            raise UserInputError(
+                "Input to predict must be a list of `ObservationFeatures`."
+            )
         observation_data = self._predict_observation_data(
             observation_features=observation_features
         )
@@ -631,7 +714,9 @@ class ModelBridge(ABC):  # noqa: B024 -- ModelBridge doesn't have any abstract m
         """Apply terminal transform, predict, and reverse terminal transform on
         output.
         """
-        raise NotImplementedError
+        raise ModelBridgeMethodNotImplementedError(
+            f"{self.__class__.__name__} does not implement `_predict`."
+        )
 
     def update(self, new_data: Data, experiment: Experiment) -> None:
         """Update the model bridge and the underlying model with new data. This
@@ -651,9 +736,9 @@ class ModelBridge(ABC):  # noqa: B024 -- ModelBridge doesn't have any abstract m
     def _get_transformed_gen_args(
         self,
         search_space: SearchSpace,
-        optimization_config: Optional[OptimizationConfig] = None,
-        pending_observations: Optional[dict[str, list[ObservationFeatures]]] = None,
-        fixed_features: Optional[ObservationFeatures] = None,
+        optimization_config: OptimizationConfig | None = None,
+        pending_observations: dict[str, list[ObservationFeatures]] | None = None,
+        fixed_features: ObservationFeatures | None = None,
     ) -> BaseGenArgs:
         if pending_observations is None:
             pending_observations = {}
@@ -709,11 +794,11 @@ class ModelBridge(ABC):  # noqa: B024 -- ModelBridge doesn't have any abstract m
     def _validate_gen_inputs(
         self,
         n: int,
-        search_space: Optional[SearchSpace] = None,
-        optimization_config: Optional[OptimizationConfig] = None,
-        pending_observations: Optional[dict[str, list[ObservationFeatures]]] = None,
-        fixed_features: Optional[ObservationFeatures] = None,
-        model_gen_options: Optional[TConfig] = None,
+        search_space: SearchSpace | None = None,
+        optimization_config: OptimizationConfig | None = None,
+        pending_observations: dict[str, list[ObservationFeatures]] | None = None,
+        fixed_features: ObservationFeatures | None = None,
+        model_gen_options: TConfig | None = None,
     ) -> None:
         """Validate inputs to `ModelBridge.gen`.
 
@@ -728,11 +813,11 @@ class ModelBridge(ABC):  # noqa: B024 -- ModelBridge doesn't have any abstract m
     def gen(
         self,
         n: int,
-        search_space: Optional[SearchSpace] = None,
-        optimization_config: Optional[OptimizationConfig] = None,
-        pending_observations: Optional[dict[str, list[ObservationFeatures]]] = None,
-        fixed_features: Optional[ObservationFeatures] = None,
-        model_gen_options: Optional[TConfig] = None,
+        search_space: SearchSpace | None = None,
+        optimization_config: OptimizationConfig | None = None,
+        pending_observations: dict[str, list[ObservationFeatures]] | None = None,
+        fixed_features: ObservationFeatures | None = None,
+        model_gen_options: TConfig | None = None,
     ) -> GeneratorRun:
         """
         Generate new points from the underlying model according to
@@ -764,9 +849,8 @@ class ModelBridge(ABC):  # noqa: B024 -- ModelBridge doesn't have any abstract m
         t_gen_start = time.monotonic()
         # Get modifiable versions
         if search_space is None:
-            search_space = self._model_space
-        orig_search_space = search_space
-        search_space = search_space.clone()
+            search_space = self._search_space
+        orig_search_space = search_space.clone()
         base_gen_args = self._get_transformed_gen_args(
             search_space=search_space,
             optimization_config=optimization_config,
@@ -837,7 +921,7 @@ class ModelBridge(ABC):  # noqa: B024 -- ModelBridge doesn't have any abstract m
             arms=arms,
             weights=gen_results.weights,
             optimization_config=optimization_config,
-            search_space=None if immutable else base_gen_args.search_space,
+            search_space=None if immutable else orig_search_space,
             model_predictions=model_predictions,
             best_arm_predictions=(
                 None if best_arm is None else (best_arm, best_point_predictions)
@@ -864,15 +948,17 @@ class ModelBridge(ABC):  # noqa: B024 -- ModelBridge doesn't have any abstract m
         self,
         n: int,
         search_space: SearchSpace,
-        optimization_config: Optional[OptimizationConfig],
+        optimization_config: OptimizationConfig | None,
         pending_observations: dict[str, list[ObservationFeatures]],
-        fixed_features: Optional[ObservationFeatures],
-        model_gen_options: Optional[TConfig],
+        fixed_features: ObservationFeatures | None,
+        model_gen_options: TConfig | None,
     ) -> GenResults:
         """Apply terminal transform, gen, and reverse terminal transform on
         output.
         """
-        raise NotImplementedError
+        raise ModelBridgeMethodNotImplementedError(
+            f"{self.__class__.__name__} does not implement `_gen`."
+        )
 
     def cross_validate(
         self,
@@ -904,7 +990,7 @@ class ModelBridge(ABC):  # noqa: B024 -- ModelBridge doesn't have any abstract m
             # users with this warning, we filter it out.
             warnings.filterwarnings(
                 "ignore",
-                message=r"Data \(outcome observations\) not standardized",
+                message=r"Data \(outcome observations\) is not standardized",
                 category=InputDataWarning,
             )
             cv_predictions = self._cross_validate(
@@ -933,7 +1019,9 @@ class ModelBridge(ABC):  # noqa: B024 -- ModelBridge doesn't have any abstract m
         """Apply the terminal transform, make predictions on the test points,
         and reverse terminal transform on the results.
         """
-        raise NotImplementedError
+        raise ModelBridgeMethodNotImplementedError(
+            f"{self.__class__.__name__} does not implement `_cross_validate`."
+        )
 
     def _transform_inputs_for_cv(
         self,
@@ -979,13 +1067,13 @@ class ModelBridge(ABC):  # noqa: B024 -- ModelBridge doesn't have any abstract m
         """Obtains the state of the underlying model (if using a stateful one)
         in a readily JSON-serializable form.
         """
-        model = not_none(self.model)
+        model = none_throws(self.model)
         return model.serialize_state(raw_state=model._get_state())
 
     def _deserialize_model_state(
         self, serialized_state: dict[str, Any]
     ) -> dict[str, Any]:
-        model = not_none(self.model)
+        model = none_throws(self.model)
         return model.deserialize_state(serialized_state=serialized_state)
 
     def feature_importances(self, metric_name: str) -> dict[str, float]:
@@ -1008,8 +1096,8 @@ class ModelBridge(ABC):  # noqa: B024 -- ModelBridge doesn't have any abstract m
             importances.
 
         """
-        raise NotImplementedError(
-            "Feature importance not available for this model type"
+        raise ModelBridgeMethodNotImplementedError(
+            f"{self.__class__.__name__} does not implement `feature_importances`."
         )
 
     # pyre-fixme[3]: Return annotation cannot be `Any`.
@@ -1033,7 +1121,9 @@ class ModelBridge(ABC):  # noqa: B024 -- ModelBridge doesn't have any abstract m
     # pyre-fixme[3]: Return annotation cannot be `Any`.
     def _transform_observations(self, observations: list[Observation]) -> Any:
         """Apply terminal transform to given observations and return result."""
-        raise NotImplementedError
+        raise ModelBridgeMethodNotImplementedError(
+            f"{self.__class__.__name__} does not implement `_transform_observations`."
+        )
 
     # pyre-fixme[3]: Return annotation cannot be `Any`.
     def transform_observation_features(
@@ -1060,7 +1150,10 @@ class ModelBridge(ABC):  # noqa: B024 -- ModelBridge doesn't have any abstract m
         self, observation_features: list[ObservationFeatures]
     ) -> Any:
         """Apply terminal transform to given observation features and return result."""
-        raise NotImplementedError
+        raise ModelBridgeMethodNotImplementedError(
+            f"{self.__class__.__name__} does not implement "
+            "`_transform_observation_features`."
+        )
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(model={self.model})"
@@ -1090,8 +1183,8 @@ def unwrap_observation_data(observation_data: list[ObservationData]) -> TModelPr
 
 def gen_arms(
     observation_features: list[ObservationFeatures],
-    arms_by_signature: Optional[dict[str, Arm]] = None,
-) -> tuple[list[Arm], Optional[dict[str, TCandidateMetadata]]]:
+    arms_by_signature: dict[str, Arm] | None = None,
+) -> tuple[list[Arm], dict[str, TCandidateMetadata] | None]:
     """Converts observation features to a tuple of arms list and candidate metadata
     dict, where arm signatures are mapped to their respective candidate metadata.
     """
@@ -1120,9 +1213,9 @@ def clamp_observation_features(
             if p.name not in obsf.parameters:
                 continue
             if p.parameter_type == ParameterType.FLOAT:
-                val = checked_cast(float, obsf.parameters[p.name])
+                val = assert_is_instance(obsf.parameters[p.name], float)
             else:
-                val = checked_cast(int, obsf.parameters[p.name])
+                val = assert_is_instance(obsf.parameters[p.name], int)
             if val < p.lower:
                 logger.info(
                     f"Untransformed parameter {val} "
@@ -1140,9 +1233,9 @@ def clamp_observation_features(
 
 def _get_status_quo_by_trial(
     observations: list[Observation],
-    status_quo_name: Optional[str] = None,
-    status_quo_features: Optional[ObservationFeatures] = None,
-) -> Optional[dict[int, ObservationData]]:
+    status_quo_name: str | None = None,
+    status_quo_features: ObservationFeatures | None = None,
+) -> dict[int, ObservationData] | None:
     r"""
     Given a status quo observation, return a dictionary of trial index to
     the status quo observation data of each trial.
@@ -1163,7 +1256,7 @@ def _get_status_quo_by_trial(
     if status_quo_name is not None:
         # identify status quo by arm name
         trial_idx_to_sq_data = {
-            int(not_none(obs.features.trial_index)): obs.data
+            int(none_throws(obs.features.trial_index)): obs.data
             for obs in observations
             if obs.arm_name == status_quo_name
         }
@@ -1173,7 +1266,7 @@ def _get_status_quo_by_trial(
             status_quo_features.parameters, sort_keys=True
         )
         trial_idx_to_sq_data = {
-            int(not_none(obs.features.trial_index)): obs.data
+            int(none_throws(obs.features.trial_index)): obs.data
             for obs in observations
             if json.dumps(obs.features.parameters, sort_keys=True)
             == status_quo_signature

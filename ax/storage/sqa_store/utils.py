@@ -7,7 +7,7 @@
 # pyre-strict
 
 import warnings
-from typing import Any, Optional
+from typing import Any
 
 from ax.core.experiment import Experiment
 from ax.core.search_space import SearchSpace
@@ -38,6 +38,9 @@ COPY_DB_IDS_ATTRS_TO_SKIP = {
     "_steps",
     "analysis_scheduler",
     "_nodes",
+    # For auxiliary experiments, we don't expect any updates, so we
+    # don't need to recur into them during `copy_db_ids`.
+    "auxiliary_experiments_by_purpose",
 }
 SKIP_ATTRS_ERROR_SUFFIX = "Consider adding to COPY_DB_IDS_ATTRS_TO_SKIP if appropriate."
 
@@ -48,7 +51,7 @@ def is_foreign_key_field(field: str) -> bool:
 
 
 # pyre-fixme[2]: Parameter annotation cannot be `Any`.
-def copy_db_ids(source: Any, target: Any, path: Optional[list[str]] = None) -> None:
+def copy_db_ids(source: Any, target: Any, path: list[str] | None = None) -> None:
     """Takes as input two objects, `source` and `target`, that should be identical,
     except that `source` has _db_ids set and `target` doesn't. Recursively copies the
     _db_ids from `source` to `target`.

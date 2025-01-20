@@ -6,11 +6,10 @@
 # pyre-strict
 import json
 from enum import IntEnum
-from typing import Optional
 
-from ax.analysis.analysis import AnalysisCard
+from ax.analysis.analysis import Analysis, AnalysisCard
 from ax.core.experiment import Experiment
-from ax.modelbridge.generation_strategy import GenerationStrategy
+from ax.core.generation_strategy_interface import GenerationStrategyInterface
 
 
 class HealthcheckStatus(IntEnum):
@@ -26,13 +25,13 @@ class HealthcheckAnalysisCard(AnalysisCard):
         return HealthcheckStatus(json.loads(self.blob)["status"])
 
 
-class HealthcheckAnalysis:
+class HealthcheckAnalysis(Analysis):
     """
     An analysis that performs a health check.
     """
 
     def compute(
         self,
-        experiment: Optional[Experiment] = None,
-        generation_strategy: Optional[GenerationStrategy] = None,
+        experiment: Experiment | None = None,
+        generation_strategy: GenerationStrategyInterface | None = None,
     ) -> HealthcheckAnalysisCard: ...

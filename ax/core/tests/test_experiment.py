@@ -15,7 +15,7 @@ import pandas as pd
 from ax.core import BatchTrial, Experiment, Trial
 from ax.core.arm import Arm
 from ax.core.auxiliary import AuxiliaryExperiment, AuxiliaryExperimentPurpose
-from ax.core.base_trial import TrialStatus
+from ax.core.base_trial import BaseTrial, TrialStatus
 from ax.core.data import Data
 from ax.core.map_data import MapData
 from ax.core.map_metric import MapMetric
@@ -34,7 +34,7 @@ from ax.core.parameter import (
 )
 from ax.core.search_space import SearchSpace
 from ax.core.types import ComparisonOp
-from ax.exceptions.core import UnsupportedError
+from ax.exceptions.core import AxError, RunnerNotFoundError, UnsupportedError
 from ax.metrics.branin import BraninMetric
 from ax.modelbridge.registry import Models
 from ax.runners.synthetic import SyntheticRunner
@@ -46,7 +46,6 @@ from ax.storage.sqa_store.save import save_experiment
 from ax.utils.common.constants import EXPERIMENT_IS_TEST_WARNING, Keys
 from ax.utils.common.random import set_rng_seed
 from ax.utils.common.testutils import TestCase
-from ax.utils.common.typeutils import checked_cast
 from ax.utils.testing.core_stubs import (
     get_arm,
     get_branin_arms,
@@ -66,7 +65,8 @@ from ax.utils.testing.core_stubs import (
     get_status_quo,
     get_test_map_data_experiment,
 )
-from ax.utils.testing.mock import fast_botorch_optimize
+from ax.utils.testing.mock import mock_botorch_optimize
+from pyre_extensions import assert_is_instance
 
 DUMMY_RUN_METADATA_KEY = "test_run_metadata_key"
 DUMMY_RUN_METADATA_VALUE = "test_run_metadata_value"
@@ -210,7 +210,7 @@ class ExperimentTest(TestCase):
 
         # Try (and fail) to create an experiment with constraints on choice
         # paramaters
-        with self.assertRaises(UnsupportedError):
+        with self.assertRaises(ValueError):
             ax_client.create_experiment(
                 name="experiment",
                 parameters=[
@@ -231,7 +231,7 @@ class ExperimentTest(TestCase):
 
         # Try (and fail) to create an experiment with constraints on fixed
         # parameters
-        with self.assertRaises(UnsupportedError):
+        with self.assertRaises(ValueError):
             ax_client.create_experiment(
                 name="experiment",
                 parameters=[
@@ -769,7 +769,6 @@ class ExperimentTest(TestCase):
             3,
         )
         self.assertEqual(type(self.experiment.trials[trial_index]), BatchTrial)
-        print({arm.name for arm in self.experiment.trials[trial_index].arms})
         self.assertEqual(
             {"arm1", "arm2", "arm3"},
             set(self.experiment.trials[trial_index].arms_by_name) - {"status_quo"},
@@ -1027,6 +1026,8 @@ class ExperimentTest(TestCase):
             with_completed_trial=True,
             with_status_quo=True,
             with_choice_parameter=True,
+            num_batch_trial=3,
+            with_completed_batch=True,
         )
         # Save the experiment to set db_ids.
         save_experiment(experiment)
@@ -1054,27 +1055,28 @@ class ExperimentTest(TestCase):
             status_quo=new_status_quo,
         )
         self.assertEqual(cloned_experiment._data_by_trial, experiment._data_by_trial)
-        self.assertEqual(len(cloned_experiment.trials), 2)
+        self.assertEqual(len(cloned_experiment.trials), 4)
         for trial_index in cloned_experiment.trials.keys():
             cloned_trial = cloned_experiment.trials[trial_index]
             original_trial = experiment.trials[trial_index]
             self.assertEqual(cloned_trial.status, original_trial.status)
-        x1 = checked_cast(
-            RangeParameter, cloned_experiment.search_space.parameters["x1"]
+        x1 = assert_is_instance(
+            cloned_experiment.search_space.parameters["x1"], RangeParameter
         )
         self.assertEqual(x1.lower, -10.0)
         self.assertEqual(x1.upper, 10.0)
-        x2 = checked_cast(
-            ChoiceParameter, cloned_experiment.search_space.parameters["x2"]
+        x2 = assert_is_instance(
+            cloned_experiment.search_space.parameters["x2"], ChoiceParameter
         )
         self.assertEqual(len(x2.values), 16)
         self.assertEqual(
-            checked_cast(Arm, cloned_experiment.status_quo).parameters,
+            assert_is_instance(cloned_experiment.status_quo, Arm).parameters,
             {"x1": 1.0, "x2": 1.0},
         )
         # make sure the sq of the original experiment is unchanged
         self.assertEqual(
-            checked_cast(Arm, experiment.status_quo).parameters, {"x1": 0.0, "x2": 0.0}
+            assert_is_instance(experiment.status_quo, Arm).parameters,
+            {"x1": 0.0, "x2": 0.0},
         )
         self.assertEqual(len(cloned_experiment.trials[0].arms), 16)
 
@@ -1085,11 +1087,12 @@ class ExperimentTest(TestCase):
         # make sure updating cloned experiment doesn't change the original experiment
         cloned_experiment.status_quo = Arm({"x1": -1.0, "x2": 1.0})
         self.assertEqual(
-            checked_cast(Arm, cloned_experiment.status_quo).parameters,
+            assert_is_instance(cloned_experiment.status_quo, Arm).parameters,
             {"x1": -1.0, "x2": 1.0},
         )
         self.assertEqual(
-            checked_cast(Arm, experiment.status_quo).parameters, {"x1": 0.0, "x2": 0.0}
+            assert_is_instance(experiment.status_quo, Arm).parameters,
+            {"x1": 0.0, "x2": 0.0},
         )
 
         # Save the cloned experiment to db and make sure the original
@@ -1098,7 +1101,15 @@ class ExperimentTest(TestCase):
         reloaded_experiment = load_experiment(experiment.name)
         self.assertEqual(experiment, reloaded_experiment)
 
-        # clone specific trials and new data only
+        # Clone specific trials.
+        # With existing data.
+        experiment._data_by_trial
+        cloned_experiment = experiment.clone_with(trial_indices=[1])
+        self.assertEqual(len(cloned_experiment.trials), 1)
+        cloned_df = cloned_experiment.lookup_data_for_trial(0)[0].df
+        self.assertEqual(cloned_df["trial_index"].iloc[0], 0)
+
+        # With new data.
         df = pd.DataFrame(
             {
                 "arm_name": ["1_0"],
@@ -1110,14 +1121,14 @@ class ExperimentTest(TestCase):
         )
         cloned_experiment = experiment.clone_with(trial_indices=[1], data=Data(df=df))
         self.assertEqual(len(cloned_experiment.trials), 1)
-        self.assertEqual(len(experiment.trials), 2)
+        self.assertEqual(len(experiment.trials), 4)
         cloned_df = cloned_experiment.lookup_data_for_trial(1)[0].df
         self.assertEqual(cloned_df.shape[0], 1)
         self.assertEqual(cloned_df["mean"].iloc[0], 100.0)
         self.assertEqual(cloned_df["sem"].iloc[0], 1.0)
         # make sure the original experiment data is unchanged
         df = experiment.lookup_data_for_trial(1)[0].df
-        self.assertEqual(df["sem"].iloc[0], 0.0)
+        self.assertEqual(df["sem"].iloc[0], 0.1)
 
         # Clone with MapData.
         experiment = get_test_map_data_experiment(
@@ -1147,6 +1158,20 @@ class ExperimentTest(TestCase):
         # for it to be equal we need to update it to match experiment.
         cloned_experiment._time_created = experiment._time_created
         self.assertEqual(cloned_experiment, experiment)
+
+        # test clear_trial_type
+        experiment = get_branin_experiment(
+            with_batch=True,
+            num_batch_trial=1,
+            with_completed_batch=True,
+        )
+        experiment.trials[0]._trial_type = "foo"
+        with self.assertRaisesRegex(
+            ValueError, "Experiment does not support trial_type foo."
+        ):
+            experiment.clone_with()
+        cloned_experiment = experiment.clone_with(clear_trial_type=True)
+        self.assertIsNone(cloned_experiment.trials[0].trial_type)
 
     def test_metric_summary_df(self) -> None:
         experiment = Experiment(
@@ -1256,6 +1281,43 @@ class ExperimentTest(TestCase):
                 self.assertEqual(
                     experiment.arms_by_signature_for_deduplication, expected_with_other
                 )
+
+    def test_trial_indices(self) -> None:
+        experiment = self.experiment
+        for _ in range(6):
+            experiment.new_trial()
+        self.assertEqual(experiment.trial_indices_expecting_data, set())
+        experiment.trials[0].mark_staged()
+        experiment.trials[1].mark_running(no_runner_required=True)
+        experiment.trials[2].mark_running(no_runner_required=True).mark_completed()
+        self.assertEqual(experiment.trial_indices_expecting_data, {1, 2})
+        experiment.trials[1].mark_abandoned()
+        self.assertEqual(experiment.trial_indices_expecting_data, {2})
+        experiment.trials[4].mark_running(no_runner_required=True)
+        self.assertEqual(experiment.trial_indices_expecting_data, {2, 4})
+        experiment.trials[4].mark_failed()
+        self.assertEqual(experiment.trial_indices_expecting_data, {2})
+        experiment.trials[5].mark_running(no_runner_required=True).mark_early_stopped()
+        self.assertEqual(experiment.trial_indices_expecting_data, {2, 5})
+
+    def test_stop_trial(self) -> None:
+        self.experiment.new_trial()
+        with patch.object(self.experiment, "runner"), patch.object(
+            self.experiment.runner, "stop", return_value=None
+        ) as mock_runner_stop, patch.object(
+            BaseTrial, "mark_early_stopped"
+        ) as mock_mark_stopped:
+            self.experiment.stop_trial_runs(trials=[self.experiment.trials[0]])
+            mock_runner_stop.assert_called_once()
+            mock_mark_stopped.assert_called_once()
+
+    def test_stop_trial_without_runner(self) -> None:
+        self.experiment.new_trial()
+        with self.assertRaisesRegex(
+            RunnerNotFoundError,
+            "Unable to stop trial runs: Runner not configured for experiment or trial.",
+        ):
+            self.experiment.stop_trial_runs(trials=[self.experiment.trials[0]])
 
 
 class ExperimentWithMapDataTest(TestCase):
@@ -1450,7 +1512,7 @@ class ExperimentWithMapDataTest(TestCase):
             new_df.drop(["arm_name", "trial_index"], axis=1),
         )
 
-    @fast_botorch_optimize
+    @mock_botorch_optimize
     def test_batch_with_multiple_generator_runs(self) -> None:
         exp = get_branin_experiment()
         # set seed to avoid transient errors caused by duplicate arms,
@@ -1540,4 +1602,44 @@ class ExperimentWithMapDataTest(TestCase):
                         another_aux_exp,
                     ],
                 },
+            )
+
+    def test_name_and_store_arm_if_not_exists_same_name_different_signature(
+        self,
+    ) -> None:
+        experiment = self.experiment
+        shared_name = "shared_name"
+
+        arm_1 = Arm({"x1": -1.0, "x2": 1.0}, name=shared_name)
+        arm_2 = Arm({"x1": -1.7, "x2": 0.2, "x3": 1})
+        self.assertNotEqual(arm_1.signature, arm_2.signature)
+
+        experiment._register_arm(arm=arm_1)
+        with self.assertRaisesRegex(
+            AxError,
+            f"Arm with name {shared_name} already exists on experiment "
+            f"with different signature.",
+        ):
+            experiment._name_and_store_arm_if_not_exists(
+                arm=arm_2, proposed_name=shared_name
+            )
+
+    def test_name_and_store_arm_if_not_exists_same_proposed_name_different_signature(
+        self,
+    ) -> None:
+        experiment = self.experiment
+        shared_name = "shared_name"
+
+        arm_1 = Arm({"x1": -1.0, "x2": 1.0}, name=shared_name)
+        arm_2 = Arm({"x1": -1.7, "x2": 0.2, "x3": 1}, name=shared_name)
+        self.assertNotEqual(arm_1.signature, arm_2.signature)
+
+        experiment._register_arm(arm=arm_1)
+        with self.assertRaisesRegex(
+            AxError,
+            f"Arm with name {shared_name} already exists on experiment "
+            f"with different signature.",
+        ):
+            experiment._name_and_store_arm_if_not_exists(
+                arm=arm_2, proposed_name="different proposed name"
             )

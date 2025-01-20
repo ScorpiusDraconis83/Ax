@@ -9,7 +9,7 @@
 import logging
 import warnings
 from math import ceil
-from typing import Any, cast, Optional, Union
+from typing import Any, cast
 
 import torch
 from ax.core.experiment import Experiment
@@ -25,7 +25,7 @@ from ax.models.types import TConfig
 from ax.models.winsorization_config import WinsorizationConfig
 from ax.utils.common.deprecation import _validate_force_random_search
 from ax.utils.common.logger import get_logger
-from ax.utils.common.typeutils import not_none
+from pyre_extensions import none_throws
 
 
 logger: logging.Logger = get_logger(__name__)
@@ -47,10 +47,10 @@ SAASBO_INCOMPATIBLE_MESSAGE = (
 
 def _make_sobol_step(
     num_trials: int = -1,
-    min_trials_observed: Optional[int] = None,
+    min_trials_observed: int | None = None,
     enforce_num_trials: bool = True,
-    max_parallelism: Optional[int] = None,
-    seed: Optional[int] = None,
+    max_parallelism: int | None = None,
+    seed: int | None = None,
     should_deduplicate: bool = False,
 ) -> GenerationStep:
     """Shortcut for creating a Sobol generation step."""
@@ -68,19 +68,18 @@ def _make_sobol_step(
 
 def _make_botorch_step(
     num_trials: int = -1,
-    min_trials_observed: Optional[int] = None,
+    min_trials_observed: int | None = None,
     enforce_num_trials: bool = True,
-    max_parallelism: Optional[int] = None,
+    max_parallelism: int | None = None,
     model: ModelRegistryBase = Models.BOTORCH_MODULAR,
-    model_kwargs: Optional[dict[str, Any]] = None,
-    winsorization_config: Optional[
-        Union[WinsorizationConfig, dict[str, WinsorizationConfig]]
-    ] = None,
+    model_kwargs: dict[str, Any] | None = None,
+    winsorization_config: None
+    | (WinsorizationConfig | dict[str, WinsorizationConfig]) = None,
     no_winsorization: bool = False,
     should_deduplicate: bool = False,
-    verbose: Optional[bool] = None,
-    disable_progbar: Optional[bool] = None,
-    jit_compile: Optional[bool] = None,
+    verbose: bool | None = None,
+    disable_progbar: bool | None = None,
+    jit_compile: bool | None = None,
     derelativize_with_raw_status_quo: bool = False,
     fit_out_of_design: bool = False,
 ) -> GenerationStep:
@@ -97,9 +96,9 @@ def _make_botorch_step(
         "use_raw_status_quo": derelativize_with_raw_status_quo
     }
     model_kwargs["transform_configs"] = model_kwargs.get("transform_configs", {})
-    model_kwargs["transform_configs"][
-        "Derelativize"
-    ] = derelativization_transform_config
+    model_kwargs["transform_configs"]["Derelativize"] = (
+        derelativization_transform_config
+    )
     model_kwargs["fit_out_of_design"] = fit_out_of_design
 
     if not no_winsorization:
@@ -108,9 +107,9 @@ def _make_botorch_step(
         transforms = model_kwargs.get("transforms", default_transforms)
         model_kwargs["transforms"] = [cast(type[Transform], Winsorize)] + transforms
         if winsorization_transform_config is not None:
-            model_kwargs["transform_configs"][
-                "Winsorize"
-            ] = winsorization_transform_config
+            model_kwargs["transform_configs"]["Winsorize"] = (
+                winsorization_transform_config
+            )
 
     if MODEL_KEY_TO_MODEL_SETUP[model.value].model_class != ModularBoTorchModel:
         if verbose is not None:
@@ -140,10 +139,10 @@ def _make_botorch_step(
 
 def _suggest_gp_model(
     search_space: SearchSpace,
-    num_trials: Optional[int] = None,
-    optimization_config: Optional[OptimizationConfig] = None,
+    num_trials: int | None = None,
+    optimization_config: OptimizationConfig | None = None,
     use_saasbo: bool = False,
-) -> Union[None, ModelRegistryBase]:
+) -> None | ModelRegistryBase:
     """Suggest a model based on the search space. None means we use Sobol.
 
     1. We use Sobol if the number of total iterations in the optimization is
@@ -188,10 +187,12 @@ def _suggest_gp_model(
                 all_range_parameters_are_discrete = False
             else:
                 num_param_discrete_values = parameter.cardinality()
+                # pyre-fixme[58]: `*` is not supported for operand types `int` and
+                #  `Union[float, int]`.
                 num_possible_points *= num_param_discrete_values
 
         if should_enumerate_param:
-            num_enumerated_combinations *= not_none(num_param_discrete_values)
+            num_enumerated_combinations *= none_throws(num_param_discrete_values)
         else:
             all_parameters_are_enumerated = False
 
@@ -265,7 +266,7 @@ def _suggest_gp_model(
 
 def calculate_num_initialization_trials(
     num_tunable_parameters: int,
-    num_trials: Optional[int],
+    num_trials: int | None,
     use_batch_trials: bool,
 ) -> int:
     """
@@ -280,7 +281,7 @@ def calculate_num_initialization_trials(
 
     ret = 2 * num_tunable_parameters
     if num_trials is not None:
-        ret = min(ret, not_none(num_trials) // 5)
+        ret = min(ret, none_throws(num_trials) // 5)
     return max(ret, 5)
 
 
@@ -289,30 +290,29 @@ def choose_generation_strategy(
     *,
     use_batch_trials: bool = False,
     enforce_sequential_optimization: bool = True,
-    random_seed: Optional[int] = None,
-    torch_device: Optional[torch.device] = None,
+    random_seed: int | None = None,
+    torch_device: torch.device | None = None,
     no_winsorization: bool = False,
-    winsorization_config: Optional[
-        Union[WinsorizationConfig, dict[str, WinsorizationConfig]]
-    ] = None,
+    winsorization_config: None
+    | (WinsorizationConfig | dict[str, WinsorizationConfig]) = None,
     derelativize_with_raw_status_quo: bool = False,
-    no_bayesian_optimization: Optional[bool] = None,
+    no_bayesian_optimization: bool | None = None,
     force_random_search: bool = False,
-    num_trials: Optional[int] = None,
-    num_initialization_trials: Optional[int] = None,
+    num_trials: int | None = None,
+    num_initialization_trials: int | None = None,
     num_completed_initialization_trials: int = 0,
-    max_initialization_trials: Optional[int] = None,
-    min_sobol_trials_observed: Optional[int] = None,
-    max_parallelism_cap: Optional[int] = None,
-    max_parallelism_override: Optional[int] = None,
-    optimization_config: Optional[OptimizationConfig] = None,
+    max_initialization_trials: int | None = None,
+    min_sobol_trials_observed: int | None = None,
+    max_parallelism_cap: int | None = None,
+    max_parallelism_override: int | None = None,
+    optimization_config: OptimizationConfig | None = None,
     should_deduplicate: bool = False,
     use_saasbo: bool = False,
-    verbose: Optional[bool] = None,
-    disable_progbar: Optional[bool] = None,
-    jit_compile: Optional[bool] = None,
-    experiment: Optional[Experiment] = None,
-    suggested_model_override: Optional[ModelRegistryBase] = None,
+    verbose: bool | None = None,
+    disable_progbar: bool | None = None,
+    jit_compile: bool | None = None,
+    experiment: Experiment | None = None,
+    suggested_model_override: ModelRegistryBase | None = None,
     fit_out_of_design: bool = False,
 ) -> GenerationStrategy:
     """Select an appropriate generation strategy based on the properties of
@@ -575,12 +575,10 @@ def choose_generation_strategy(
 
 
 def _get_winsorization_transform_config(
-    winsorization_config: Optional[
-        Union[WinsorizationConfig, dict[str, WinsorizationConfig]]
-    ],
+    winsorization_config: None | (WinsorizationConfig | dict[str, WinsorizationConfig]),
     derelativize_with_raw_status_quo: bool,
     no_winsorization: bool,
-) -> Optional[TConfig]:
+) -> TConfig | None:
     if no_winsorization:
         if winsorization_config is not None:
             warnings.warn(

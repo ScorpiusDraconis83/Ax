@@ -17,9 +17,9 @@ from ax.modelbridge.model_spec import FactoryFunctionModelSpec, ModelSpec
 from ax.modelbridge.modelbridge_utils import extract_search_space_digest
 from ax.modelbridge.registry import Models
 from ax.utils.common.testutils import TestCase
-from ax.utils.common.typeutils import not_none
 from ax.utils.testing.core_stubs import get_branin_experiment
-from ax.utils.testing.mock import fast_botorch_optimize
+from ax.utils.testing.mock import mock_botorch_optimize
+from pyre_extensions import none_throws
 
 
 class BaseModelSpecTest(TestCase):
@@ -35,15 +35,15 @@ class BaseModelSpecTest(TestCase):
 
 
 class ModelSpecTest(BaseModelSpecTest):
-    @fast_botorch_optimize
+    @mock_botorch_optimize
     def test_construct(self) -> None:
-        ms = ModelSpec(model_enum=Models.GPEI)
+        ms = ModelSpec(model_enum=Models.BOTORCH_MODULAR)
         with self.assertRaises(UserInputError):
             ms.gen(n=1)
         ms.fit(experiment=self.experiment, data=self.data)
         ms.gen(n=1)
 
-    @fast_botorch_optimize
+    @mock_botorch_optimize
     # We can use `extract_search_space_digest` as a surrogate for executing
     # the full TorchModelBridge._fit.
     @mock.patch(
@@ -51,7 +51,7 @@ class ModelSpecTest(BaseModelSpecTest):
         wraps=extract_search_space_digest,
     )
     def test_fit(self, wrapped_extract_ssd: Mock) -> None:
-        ms = ModelSpec(model_enum=Models.GPEI)
+        ms = ModelSpec(model_enum=Models.BOTORCH_MODULAR)
         # This should fit the model as usual.
         ms.fit(experiment=self.experiment, data=self.data)
         wrapped_extract_ssd.assert_called_once()
@@ -67,8 +67,12 @@ class ModelSpecTest(BaseModelSpecTest):
         wrapped_extract_ssd.assert_called_once()
 
     def test_model_key(self) -> None:
-        ms = ModelSpec(model_enum=Models.GPEI)
-        self.assertEqual(ms.model_key, "GPEI")
+        ms = ModelSpec(model_enum=Models.BOTORCH_MODULAR)
+        self.assertEqual(ms.model_key, "BoTorch")
+        ms = ModelSpec(
+            model_enum=Models.BOTORCH_MODULAR, model_key_override="MBM with defaults"
+        )
+        self.assertEqual(ms.model_key, "MBM with defaults")
 
     @patch(f"{ModelSpec.__module__}.compute_diagnostics")
     @patch(f"{ModelSpec.__module__}.cross_validate", return_value=["fake-cv-result"])
@@ -155,7 +159,7 @@ class ModelSpecTest(BaseModelSpecTest):
         mock_diagnostics.assert_not_called()
 
     def test_fixed_features(self) -> None:
-        ms = ModelSpec(model_enum=Models.GPEI)
+        ms = ModelSpec(model_enum=Models.BOTORCH_MODULAR)
         self.assertIsNone(ms.fixed_features)
         new_features = ObservationFeatures(parameters={"a": 1.0})
         ms.fixed_features = new_features
@@ -166,21 +170,38 @@ class ModelSpecTest(BaseModelSpecTest):
         ms = ModelSpec(model_enum=Models.SOBOL)
         ms.fit(experiment=self.experiment, data=self.data)
         gr = ms.gen(n=1)
-        gen_metadata = not_none(gr.gen_metadata)
+        gen_metadata = none_throws(gr.gen_metadata)
         self.assertEqual(gen_metadata["model_fit_quality"], None)
         self.assertEqual(gen_metadata["model_std_quality"], None)
         self.assertEqual(gen_metadata["model_fit_generalization"], None)
         self.assertEqual(gen_metadata["model_std_generalization"], None)
 
     def test_gen_attaches_model_fit_metadata_if_applicable(self) -> None:
-        ms = ModelSpec(model_enum=Models.GPEI)
+        ms = ModelSpec(model_enum=Models.BOTORCH_MODULAR)
         ms.fit(experiment=self.experiment, data=self.data)
         gr = ms.gen(n=1)
-        gen_metadata = not_none(gr.gen_metadata)
+        gen_metadata = none_throws(gr.gen_metadata)
         self.assertIsInstance(gen_metadata["model_fit_quality"], float)
         self.assertIsInstance(gen_metadata["model_std_quality"], float)
         self.assertIsInstance(gen_metadata["model_fit_generalization"], float)
         self.assertIsInstance(gen_metadata["model_std_generalization"], float)
+
+    def test_spec_string_representation(self) -> None:
+        ms = ModelSpec(
+            model_enum=Models.BOTORCH_MODULAR,
+            model_kwargs={"test_model_kwargs": 1},
+            model_gen_kwargs={"test_gen_kwargs": 1},
+            model_cv_kwargs={"test_cv_kwargs": 1},
+        )
+        ms.model_key_override = "test_model_key_override"
+
+        repr_str = repr(ms)
+
+        self.assertNotIn("\n", repr_str)
+        self.assertIn("test_model_kwargs", repr_str)
+        self.assertIn("test_gen_kwargs", repr_str)
+        self.assertIn("test_cv_kwargs", repr_str)
+        self.assertIn("test_model_key_override", repr_str)
 
 
 class FactoryFunctionModelSpecTest(BaseModelSpecTest):
@@ -194,3 +215,10 @@ class FactoryFunctionModelSpecTest(BaseModelSpecTest):
     def test_model_key(self) -> None:
         ms = FactoryFunctionModelSpec(factory_function=get_sobol)
         self.assertEqual(ms.model_key, "get_sobol")
+        with self.assertRaisesRegex(TypeError, "cannot extract name"):
+            # pyre-ignore[6] - Invalid factory function for testing.
+            FactoryFunctionModelSpec(factory_function="test")
+        ms = FactoryFunctionModelSpec(
+            factory_function=get_sobol, model_key_override="fancy sobol"
+        )
+        self.assertEqual(ms.model_key, "fancy sobol")

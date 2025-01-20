@@ -9,9 +9,10 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Callable
 from math import isnan
 from numbers import Number
-from typing import Any, Callable, Optional, TYPE_CHECKING, Union
+from typing import Any, TYPE_CHECKING
 
 import numpy as np
 from ax.core.observation import Observation, ObservationData, ObservationFeatures
@@ -43,6 +44,8 @@ class ClosestLookupDict(dict):
         if not isinstance(key, Number):
             raise ValueError("ClosestLookupDict only allows numerical keys.")
         super().__setitem__(key, val)
+        # pyre-fixme[6]: For 2nd argument expected `Union[bytes, complex, float,
+        #  int, generic, str]` but got `Number`.
         ipos = np.searchsorted(self._keys, key)
         self._keys.insert(ipos, key)
 
@@ -53,6 +56,8 @@ class ClosestLookupDict(dict):
         except KeyError:
             if not self.keys():
                 raise RuntimeError("ClosestLookupDict is empty.")
+            # pyre-fixme[6]: For 2nd argument expected `Union[bytes, complex, float,
+            #  int, generic, str]` but got `Number`.
             ipos = np.searchsorted(self._keys, key)
             if ipos == 0:
                 return super().__getitem__(self._keys[0])
@@ -67,7 +72,7 @@ class ClosestLookupDict(dict):
 
 def get_data(
     observation_data: list[ObservationData],
-    metric_names: Union[list[str], None] = None,
+    metric_names: list[str] | None = None,
     raise_on_non_finite_data: bool = True,
 ) -> dict[str, list[float]]:
     """Extract all metrics if `metric_names` is None.
@@ -108,21 +113,24 @@ def match_ci_width_truncated(
     See log_y transform for the original. Here, bounds are forced to lie
     within a [lower_bound, upper_bound] interval after transformation."""
     fac = norm.ppf(1 - (1 - level) / 2)
-    d = fac * np.sqrt(variance)
     if clip_mean:
         mean = np.clip(mean, lower_bound + margin, upper_bound - margin)
-    right = min(mean + d, upper_bound - margin)
-    left = max(mean - d, lower_bound + margin)
-    width_asym = transform(right) - transform(left)
     new_mean = transform(mean)
-    new_variance = float("nan") if isnan(variance) else (width_asym / 2 / fac) ** 2
+    if isnan(variance):
+        new_variance = variance
+    else:
+        d = fac * np.sqrt(variance)
+        right = min(mean + d, upper_bound - margin)
+        left = max(mean - d, lower_bound + margin)
+        width_asym = transform(right) - transform(left)
+        new_variance = (width_asym / 2 / fac) ** 2
     return new_mean, new_variance
 
 
 def construct_new_search_space(
     search_space: SearchSpace,
     parameters: list[Parameter],
-    parameter_constraints: Optional[list[ParameterConstraint]] = None,
+    parameter_constraints: list[ParameterConstraint] | None = None,
 ) -> SearchSpace:
     """Construct a search space with the transformed arguments.
 
@@ -154,8 +162,8 @@ def construct_new_search_space(
 
 def derelativize_optimization_config_with_raw_status_quo(
     optimization_config: OptimizationConfig,
-    modelbridge: "modelbridge_module.base.ModelBridge",
-    observations: Optional[list[Observation]],
+    modelbridge: modelbridge_module.base.ModelBridge,
+    observations: list[Observation] | None,
 ) -> OptimizationConfig:
     """Derelativize optimization_config using raw status-quo values"""
     tf = Derelativize(

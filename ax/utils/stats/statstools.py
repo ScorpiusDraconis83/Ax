@@ -6,20 +6,26 @@
 
 # pyre-strict
 
+from __future__ import annotations
+
 from logging import Logger
 from typing import Union
 
 import numpy as np
+import numpy.typing as npt
 import pandas as pd
 from ax.core.data import Data
 from ax.utils.common.logger import get_logger
 
 logger: Logger = get_logger(__name__)
+# pyre-fixme[24]: Generic type `np.ndarray` expects 2 type parameters.
 num_mixed = Union[np.ndarray, list[float]]
 
 
 def inverse_variance_weight(
-    means: np.ndarray, variances: np.ndarray, conflicting_noiseless: str = "warn"
+    means: npt.NDArray,
+    variances: npt.NDArray,
+    conflicting_noiseless: str = "warn",
 ) -> tuple[float, float]:
     """Perform inverse variance weighting.
 
@@ -57,7 +63,9 @@ def inverse_variance_weight(
 
 
 def total_variance(
-    means: np.ndarray, variances: np.ndarray, sample_sizes: np.ndarray
+    means: npt.NDArray,
+    variances: npt.NDArray,
+    sample_sizes: npt.NDArray,
 ) -> float:
     """Compute total variance."""
     variances = variances * sample_sizes
@@ -69,8 +77,9 @@ def total_variance(
 
 
 def positive_part_james_stein(
-    means: num_mixed, sems: num_mixed
-) -> tuple[np.ndarray, np.ndarray]:
+    means: num_mixed,
+    sems: num_mixed,
+) -> tuple[npt.NDArray, npt.NDArray]:
     """Estimation method for Positive-part James-Stein estimator.
 
     This method takes a vector of K means (`y_i`) and standard errors
@@ -128,29 +137,27 @@ def positive_part_james_stein(
     sigma2_i = np.power(sems, 2)
     ybar = np.mean(y_i)
     s2 = np.var(y_i - ybar, ddof=3)  # sample variance normalized by K-3
-    if s2 == 0:
-        phi_i = 1
-    else:
-        phi_i = np.minimum(1, sigma2_i / s2)
-    mu_hat_i = y_i + phi_i * (ybar - y_i)
+    phi_i = np.ones_like(sigma2_i) if s2 == 0 else np.minimum(1, sigma2_i / s2)
+    mu_hat_i = y_i + phi_i * np.subtract(ybar, y_i)
+
     sigma_hat_i = np.sqrt(
-        (1 - phi_i) * sigma2_i
+        np.subtract(1.0, phi_i) * sigma2_i
         + phi_i * sigma2_i / K
-        + 2 * phi_i**2 * (y_i - ybar) ** 2 / (K - 3)
+        + np.multiply(2, phi_i**2) * (y_i - ybar) ** 2 / (K - 3)
     )
     return mu_hat_i, sigma_hat_i
 
 
 def relativize(
-    means_t: Union[np.ndarray, list[float], float],
-    sems_t: Union[np.ndarray, list[float], float],
+    means_t: npt.NDArray | list[float] | float,
+    sems_t: npt.NDArray | list[float] | float,
     mean_c: float,
     sem_c: float,
     bias_correction: bool = True,
-    cov_means: Union[np.ndarray, list[float], float] = 0.0,
+    cov_means: npt.NDArray | list[float] | float = 0.0,
     as_percent: bool = False,
     control_as_constant: bool = False,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[npt.NDArray, npt.NDArray]:
     """Ratio estimator based on the delta method.
 
     This uses the delta method (i.e. a Taylor series approximation) to estimate
@@ -213,7 +220,7 @@ def relativize(
     epsilon = 1e-10
     if np.any(np.abs(mean_c) < epsilon):
         raise ValueError(
-            "mean_control ({0} +/- {1}) is smaller than 1 in 10 billion, "
+            "mean_control ({} +/- {}) is smaller than 1 in 10 billion, "
             "which is too small to reliably analyze ratios using the delta "
             "method. This usually occurs because winsorization has truncated "
             "all values down to zero. Try using a delta type that applies "
@@ -243,15 +250,15 @@ def relativize(
 
 
 def unrelativize(
-    means_t: Union[np.ndarray, list[float], float],
-    sems_t: Union[np.ndarray, list[float], float],
+    means_t: npt.NDArray | list[float] | float,
+    sems_t: npt.NDArray | list[float] | float,
     mean_c: float,
     sem_c: float,
     bias_correction: bool = True,
-    cov_means: Union[np.ndarray, list[float], float] = 0.0,
+    cov_means: npt.NDArray | list[float] | float = 0.0,
     as_percent: bool = False,
     control_as_constant: bool = False,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[npt.NDArray, npt.NDArray]:
     """
     Reverse operation of ax.utils.stats.statstools.relativize.
 
@@ -302,18 +309,24 @@ def unrelativize(
             m_t = mean_c
             s_t = sem_c
     else:
+        m_t = np.array(m_t)
+        s_t = np.array(s_t)
         m_t[means_t == 0.0] = mean_c
         s_t[means_t == 0.0] = sem_c
 
+    # pyre-fixme[7]: Expected `Tuple[ndarray[typing.Any, typing.Any],
+    #  ndarray[typing.Any, typing.Any]]` but got `Tuple[Union[ndarray[typing.Any,
+    #  dtype[typing.Any]], float], Union[ndarray[typing.Any, dtype[typing.Any]],
+    #  float]]`.
     return m_t, s_t
 
 
 def agresti_coull_sem(
-    n_numer: Union[pd.Series, np.ndarray, int],
-    n_denom: Union[pd.Series, np.ndarray, int],
+    n_numer: pd.Series | npt.NDArray | int,
+    n_denom: pd.Series | npt.NDArray | int,
     prior_successes: int = 2,
     prior_failures: int = 2,
-) -> Union[np.ndarray, float]:
+) -> npt.NDArray | float:
     """Compute the Agresti-Coull style standard error for a binomial proportion.
 
     Reference:
@@ -414,7 +427,9 @@ def relativize_data(
     for grp in grouped_df.groups.keys():
         subgroup_df = grouped_df.get_group(grp)
         is_sq = subgroup_df["arm_name"] == status_quo_name
-        sq_mean, sq_sem = subgroup_df[is_sq][["mean", "sem"]].values.flatten()
+        sq_mean, sq_sem = (
+            subgroup_df[is_sq][["mean", "sem"]].drop_duplicates().values.flatten()
+        )
 
         # rm status quo from final df to relativize
         if not include_sq:

@@ -5,13 +5,16 @@
 
 # pyre-strict
 
-import logging
+
+from enum import unique
 from logging import Logger
 from unittest.mock import patch
 
 import pandas as pd
+from ax.core.auxiliary import AuxiliaryExperiment, AuxiliaryExperimentPurpose
 from ax.core.base_trial import TrialStatus
 from ax.core.data import Data
+from ax.exceptions.core import UserInputError
 from ax.modelbridge.generation_strategy import (
     GenerationNode,
     GenerationStep,
@@ -21,18 +24,28 @@ from ax.modelbridge.model_spec import ModelSpec
 from ax.modelbridge.registry import Models
 from ax.modelbridge.transition_criterion import (
     AutoTransitionAfterGen,
+    AuxiliaryExperimentCheck,
+    IsSingleObjective,
     MaxGenerationParallelism,
     MaxTrials,
     MinimumPreferenceOccurances,
     MinimumTrialsInStatus,
     MinTrials,
-    TransitionCriterion,
 )
 from ax.utils.common.logger import get_logger
 from ax.utils.common.testutils import TestCase
-from ax.utils.testing.core_stubs import get_branin_experiment, get_experiment
+from ax.utils.testing.core_stubs import (
+    get_branin_experiment,
+    get_branin_multi_objective_optimization_config,
+    get_experiment,
+)
 
 logger: Logger = get_logger(__name__)
+
+
+@unique
+class TestAuxiliaryExperimentPurpose(AuxiliaryExperimentPurpose):
+    TestAuxExpPurpose = "test_aux_exp_purpose"
 
 
 class TestTransitionCriterion(TestCase):
@@ -58,7 +71,7 @@ class TestTransitionCriterion(TestCase):
                     completion_criteria=[criterion],
                 ),
                 GenerationStep(
-                    model=Models.GPEI,
+                    model=Models.BOTORCH_MODULAR,
                     num_trials=-1,
                     max_parallelism=1,
                 ),
@@ -92,8 +105,83 @@ class TestTransitionCriterion(TestCase):
                 )
             )
             self.assertEqual(
-                generation_strategy._curr.model_spec_to_gen_from.model_enum, Models.GPEI
+                generation_strategy._curr.model_spec_to_gen_from.model_enum,
+                Models.BOTORCH_MODULAR,
             )
+
+    def test_aux_experiment_check(self) -> None:
+        """Tests that the aux experiment check transition."""
+        # Test incorrect instantiation
+        with self.assertRaisesRegex(UserInputError, r"cannot have both .* None"):
+            AuxiliaryExperimentCheck(
+                transition_to="some_node",
+                auxiliary_experiment_purposes_to_include=None,
+                auxiliary_experiment_purposes_to_exclude=None,
+            )
+
+    def test_aux_experiment_check_in_gs(self) -> None:
+        """Tests that the aux experiment check transition works as expected in a GS."""
+        experiment = self.branin_experiment
+        gs = GenerationStrategy(
+            name="test",
+            nodes=[
+                GenerationNode(
+                    node_name="sobol_1",
+                    model_specs=[self.sobol_model_spec],
+                    transition_criteria=[
+                        AuxiliaryExperimentCheck(
+                            transition_to="sobol_2",
+                            auxiliary_experiment_purposes_to_include=[
+                                TestAuxiliaryExperimentPurpose.TestAuxExpPurpose
+                            ],
+                        )
+                    ],
+                ),
+                GenerationNode(
+                    node_name="sobol_2",
+                    model_specs=[self.sobol_model_spec],
+                    transition_criteria=[
+                        AuxiliaryExperimentCheck(
+                            transition_to="sobol_1",
+                            auxiliary_experiment_purposes_to_exclude=[
+                                TestAuxiliaryExperimentPurpose.TestAuxExpPurpose
+                            ],
+                        )
+                    ],
+                ),
+            ],
+        )
+        gs._experiment = experiment
+        aux_exp = AuxiliaryExperiment(experiment=get_experiment())
+        # Initial check
+        self.assertEqual(gs.current_node_name, "sobol_1")
+
+        # Do not transition because no aux experiment
+        grs = gs._gen_with_multiple_nodes(experiment=experiment, n=5)
+        self.assertEqual(gs.current_node_name, "sobol_1")
+        self.assertEqual(len(grs), 1)
+        self.assertEqual(len(grs[0].arms), 5)
+
+        # Transition because auxiliary_experiment_purposes_to_include is met
+        experiment.auxiliary_experiments_by_purpose = {
+            TestAuxiliaryExperimentPurpose.TestAuxExpPurpose: [aux_exp],
+        }
+        grs = gs._gen_with_multiple_nodes(experiment=experiment, n=5)
+        self.assertEqual(gs.current_node_name, "sobol_2")
+        self.assertEqual(len(grs), 1)
+        self.assertEqual(len(grs[0].arms), 5)
+        # Do not move even when the aux exp is still there
+        grs = gs._gen_with_multiple_nodes(experiment=experiment, n=5)
+        self.assertEqual(gs.current_node_name, "sobol_2")
+        self.assertEqual(len(grs), 1)
+        self.assertEqual(len(grs[0].arms), 5)
+
+        # Remove the aux experiment and move back to sobol_1
+        experiment.auxiliary_experiments_by_purpose = {}
+        grs = gs._gen_with_multiple_nodes(experiment=experiment, n=5)
+        self.assertEqual(gs.current_node_name, "sobol_1")
+        self.assertEqual(len(grs), 1)
+        self.assertEqual(len(grs[0].arms), 5)
 
     def test_default_step_criterion_setup(self) -> None:
         """This test ensures that the default completion criterion for GenerationSteps
@@ -106,21 +194,21 @@ class TestTransitionCriterion(TestCase):
         """
         experiment = get_experiment()
         gs = GenerationStrategy(
-            name="SOBOL+GPEI::default",
+            name="SOBOL+MBM::default",
             steps=[
                 GenerationStep(
                     model=Models.SOBOL,
                     num_trials=3,
                 ),
                 GenerationStep(
-                    model=Models.GPEI,
+                    model=Models.BOTORCH_MODULAR,
                     num_trials=4,
                     max_parallelism=1,
                     min_trials_observed=2,
                     enforce_num_trials=False,
                 ),
                 GenerationStep(
-                    model=Models.GPEI,
+                    model=Models.BOTORCH_MODULAR,
                     num_trials=-1,
                 ),
             ],
@@ -128,7 +216,7 @@ class TestTransitionCriterion(TestCase):
         gs.experiment = experiment
 
         step_0_expected_transition_criteria = [
-            MaxTrials(
+            MinTrials(
                 threshold=3,
                 block_gen_if_met=True,
                 transition_to="GenerationStep_1",
@@ -137,7 +225,7 @@ class TestTransitionCriterion(TestCase):
             ),
         ]
         step_1_expected_transition_criteria = [
-            MaxTrials(
+            MinTrials(
                 threshold=4,
                 block_gen_if_met=False,
                 transition_to="GenerationStep_2",
@@ -191,8 +279,6 @@ class TestTransitionCriterion(TestCase):
         # Need to add trials to test the transition criteria `is_met` method
         for _i in range(4):
             experiment.new_trial(gs.gen(experiment=experiment))
-
-        # TODO: @mgarrard More comprehensive test of trials_from_node
         node_0_trials = gs._steps[0].trials_from_node
         node_1_trials = gs._steps[1].trials_from_node
 
@@ -204,7 +290,7 @@ class TestTransitionCriterion(TestCase):
         self.assertFalse(
             gs._steps[0]
             .transition_criteria[1]
-            .is_met(experiment, gs._steps[0].trials_from_node)
+            .is_met(experiment=experiment, curr_node=gs._steps[0])
         )
 
         # Should pass after two trials are marked completed
@@ -215,7 +301,7 @@ class TestTransitionCriterion(TestCase):
         self.assertTrue(
             gs._steps[0]
             .transition_criteria[1]
-            .is_met(experiment, gs._steps[0].trials_from_node)
+            .is_met(experiment=experiment, curr_node=gs._steps[0])
         )
 
         # Check mixed status MinTrials
@@ -224,12 +310,14 @@ class TestTransitionCriterion(TestCase):
             only_in_statuses=[TrialStatus.COMPLETED, TrialStatus.EARLY_STOPPED],
         )
         self.assertFalse(
-            min_criterion.is_met(experiment, gs._steps[0].trials_from_node)
+            min_criterion.is_met(experiment=experiment, curr_node=gs._steps[0])
         )
         for idx, trial in experiment.trials.items():
             if idx == 2:
                 trial._status = TrialStatus.EARLY_STOPPED
-        self.assertTrue(min_criterion.is_met(experiment, gs._steps[0].trials_from_node))
+        self.assertTrue(
+            min_criterion.is_met(experiment=experiment, curr_node=gs._steps[0])
+        )
 
     def test_auto_transition(self) -> None:
         """Very simple test to validate AutoTransitionAfterGen"""
@@ -251,8 +339,84 @@ class TestTransitionCriterion(TestCase):
         )
         gs.experiment = experiment
         self.assertEqual(gs.current_node_name, "sobol_1")
-        gs.gen(experiment=experiment)
-        gs.gen(experiment=experiment)
+        gs._gen_with_multiple_nodes(experiment=experiment)
+        gs._gen_with_multiple_nodes(experiment=experiment)
+        self.assertEqual(gs.current_node_name, "sobol_2")
+
+    def test_auto_with_should_skip_node(self) -> None:
+        experiment = self.branin_experiment
+        gs = GenerationStrategy(
+            name="test",
+            nodes=[
+                GenerationNode(
+                    node_name="sobol_1",
+                    model_specs=[self.sobol_model_spec],
+                    transition_criteria=[
+                        AutoTransitionAfterGen(transition_to="sobol_2")
+                    ],
+                ),
+                GenerationNode(
+                    node_name="sobol_2", model_specs=[self.sobol_model_spec]
+                ),
+            ],
+        )
+        gs._nodes[0]._should_skip = True
+        self.assertTrue(
+            gs._nodes[0]
+            .transition_criteria[0]
+            .is_met(experiment=experiment, curr_node=gs._nodes[0])
+        )
+
+    def test_is_single_objective_does_not_transition(self) -> None:
+        exp = self.branin_experiment
+        exp.optimization_config = get_branin_multi_objective_optimization_config()
+        gs = GenerationStrategy(
+            name="test",
+            nodes=[
+                GenerationNode(
+                    node_name="sobol_1",
+                    model_specs=[self.sobol_model_spec],
+                    transition_criteria=[IsSingleObjective(transition_to="sobol_2")],
+                ),
+                GenerationNode(
+                    node_name="sobol_2", model_specs=[self.sobol_model_spec]
+                ),
+            ],
+        )
+        self.assertEqual(gs.current_node_name, "sobol_1")
+        # Should not transition because this is a MOO experiment
+        gr = gs.gen(experiment=exp)
+        gr2 = gs.gen(experiment=exp)
+        self.assertEqual(gr._generation_node_name, "sobol_1")
+        self.assertEqual(gr2._generation_node_name, "sobol_1")
+        self.assertEqual(gs.current_node_name, "sobol_1")
+
+    def test_is_single_objective_transitions(self) -> None:
+        exp = self.branin_experiment
+        gs = GenerationStrategy(
+            name="test",
+            nodes=[
+                GenerationNode(
+                    node_name="sobol_1",
+                    model_specs=[self.sobol_model_spec],
+                    transition_criteria=[
+                        IsSingleObjective(transition_to="sobol_2"),
+                        AutoTransitionAfterGen(
+                            transition_to="sobol_2", continue_trial_generation=False
+                        ),
+                    ],
+                ),
+                GenerationNode(
+                    node_name="sobol_2", model_specs=[self.sobol_model_spec]
+                ),
+            ],
+        )
+        self.assertEqual(gs.current_node_name, "sobol_1")
+        gr = gs.gen(experiment=exp)
+        gr2 = gs.gen(experiment=exp)
+        # First generation should use sobol_1, then transition to sobol_2
+        self.assertEqual(gr._generation_node_name, "sobol_1")
+        self.assertEqual(gr2._generation_node_name, "sobol_2")
         self.assertEqual(gs.current_node_name, "sobol_2")
 
     def test_max_trials_is_met(self) -> None:
@@ -288,10 +452,9 @@ class TestTransitionCriterion(TestCase):
             .transition_criteria[0]
             .is_met(
                 experiment=experiment,
-                trials_from_node=gs._steps[0].trials_from_node,
+                curr_node=gs._steps[0],
             )
         )
-
         # After adding trials, should pass
         for _i in range(4):
             experiment.new_trial(gs.gen(experiment=experiment))
@@ -300,10 +463,9 @@ class TestTransitionCriterion(TestCase):
             .transition_criteria[0]
             .is_met(
                 experiment=experiment,
-                trials_from_node=gs._steps[0].trials_from_node,
+                curr_node=gs._steps[0],
             )
         )
-
         # Check not in statuses and only in statuses
         max_criterion_not_in_statuses = MaxTrials(
             threshold=2,
@@ -318,15 +480,14 @@ class TestTransitionCriterion(TestCase):
         # experiment currently has 4 trials, but none of them are completed
         self.assertTrue(
             max_criterion_not_in_statuses.is_met(
-                experiment, trials_from_node=gs._steps[0].trials_from_node
+                experiment=experiment, curr_node=gs._steps[0]
             )
         )
         self.assertFalse(
             max_criterion_only_statuses.is_met(
-                experiment, trials_from_node=gs._steps[0].trials_from_node
+                experiment=experiment, curr_node=gs._steps[0]
             )
         )
-
         # set 3 of the 4 trials to status == completed
         for _idx, trial in experiment.trials.items():
             trial._status = TrialStatus.COMPLETED
@@ -334,17 +495,17 @@ class TestTransitionCriterion(TestCase):
                 break
         self.assertTrue(
             max_criterion_only_statuses.is_met(
-                experiment, trials_from_node=gs._steps[0].trials_from_node
+                experiment=experiment, curr_node=gs._steps[0]
             )
         )
         self.assertFalse(
             max_criterion_not_in_statuses.is_met(
-                experiment, trials_from_node=gs._steps[0].trials_from_node
+                experiment=experiment, curr_node=gs._steps[0]
             )
         )
 
-    def test_trials_from_node_none(self) -> None:
-        """Tests MinTrials and MaxTrials default to experiment
+    def test_trials_from_node_empty(self) -> None:
+        """Tests MinTrials defaults to experiment
         level trials when trials_from_node is None.
         """
         experiment = get_experiment()
@@ -359,53 +520,38 @@ class TestTransitionCriterion(TestCase):
                 ),
             ],
         )
+        gs.experiment = experiment
         max_criterion_with_status = MaxTrials(
             threshold=2,
             block_gen_if_met=True,
             only_in_statuses=[TrialStatus.COMPLETED],
         )
         max_criterion = MaxTrials(threshold=2, block_gen_if_met=True)
-        warning_msg = (
-            "`trials_from_node` is None, will check threshold on" + " experiment level."
+        self.assertFalse(
+            max_criterion.is_met(experiment=experiment, curr_node=gs._steps[0])
         )
 
-        # no trials so criterion should be false, then add trials to pass criterion
-        with self.assertLogs(TransitionCriterion.__module__, logging.WARNING) as logger:
-            self.assertFalse(max_criterion.is_met(experiment, trials_from_node=None))
-            self.assertTrue(
-                any(warning_msg in output for output in logger.output),
-                logger.output,
-            )
         for _i in range(3):
             experiment.new_trial(gs.gen(experiment=experiment))
-        self.assertTrue(max_criterion.is_met(experiment, trials_from_node=None))
+        self.assertTrue(
+            max_criterion.is_met(experiment=experiment, curr_node=gs._steps[0])
+        )
 
         # Before marking trial status it should be false, until trials are completed
         self.assertFalse(
-            max_criterion_with_status.is_met(experiment, trials_from_node=None)
+            max_criterion_with_status.is_met(
+                experiment=experiment, curr_node=gs._steps[0]
+            )
         )
         for idx, trial in experiment.trials.items():
             trial._status = TrialStatus.COMPLETED
             if idx == 1:
                 break
         self.assertTrue(
-            max_criterion_with_status.is_met(experiment, trials_from_node=None)
-        )
-
-        # Check MinTrials
-        min_criterion = MinTrials(
-            threshold=3,
-            only_in_statuses=[TrialStatus.COMPLETED, TrialStatus.EARLY_STOPPED],
-        )
-        with self.assertLogs(TransitionCriterion.__module__, logging.WARNING) as logger:
-            self.assertFalse(min_criterion.is_met(experiment, trials_from_node=None))
-            self.assertTrue(
-                any(warning_msg in output for output in logger.output),
-                logger.output,
+            max_criterion_with_status.is_met(
+                experiment=experiment, curr_node=gs._steps[0]
             )
-        for _idx, trial in experiment.trials.items():
-            trial._status = TrialStatus.COMPLETED
-        self.assertTrue(min_criterion.is_met(experiment, trials_from_node=None))
+        )
 
     def test_repr(self) -> None:
         """Tests that the repr string is correctly formatted for all
@@ -429,7 +575,8 @@ class TestTransitionCriterion(TestCase):
             + "'block_transition_if_unmet': False, "
             + "'block_gen_if_met': True, "
             + "'use_all_trials_in_exp': False, "
-            + "'continue_trial_generation': False})",
+            + "'continue_trial_generation': False, "
+            + "'count_only_trials_with_data': False})",
         )
         minimum_trials_in_status_criterion = MinTrials(
             only_in_statuses=[TrialStatus.COMPLETED, TrialStatus.EARLY_STOPPED],
@@ -448,7 +595,8 @@ class TestTransitionCriterion(TestCase):
             + "'block_transition_if_unmet': False, "
             + "'block_gen_if_met': True, "
             + "'use_all_trials_in_exp': False, "
-            + "'continue_trial_generation': False})",
+            + "'continue_trial_generation': False, "
+            + "'count_only_trials_with_data': False})",
         )
         minimum_preference_occurrences_criterion = MinimumPreferenceOccurances(
             metric_name="m1", threshold=3

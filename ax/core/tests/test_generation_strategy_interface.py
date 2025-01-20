@@ -5,12 +5,12 @@
 
 # pyre-strict
 
-from typing import Optional
 
 from ax.core.data import Data
 from ax.core.experiment import Experiment
 from ax.core.generation_strategy_interface import GenerationStrategyInterface
 from ax.core.generator_run import GeneratorRun
+from ax.core.observation import ObservationFeatures
 from ax.exceptions.core import AxError, UnsupportedError
 from ax.utils.common.testutils import TestCase
 from ax.utils.testing.core_stubs import get_experiment, SpecialGenerationStrategy
@@ -20,11 +20,11 @@ class MyGSI(GenerationStrategyInterface):
     def gen_for_multiple_trials_with_multiple_models(
         self,
         experiment: Experiment,
-        data: Optional[Data] = None,
-        # TODO[drfreund, danielcohennyc, mgarrard]: Update the format of the arguments
-        # below as we find the right one.
-        num_generator_runs: int = 1,
-        n: int = 1,
+        data: Data | None = None,
+        pending_observations: dict[str, list[ObservationFeatures]] | None = None,
+        n: int | None = None,
+        num_trials: int = 1,
+        arms_per_node: dict[str, int] | None = None,
     ) -> list[list[GeneratorRun]]:
         raise NotImplementedError
 

@@ -7,7 +7,6 @@
 # pyre-strict
 
 from contextlib import ExitStack
-from typing import Optional
 from unittest.mock import patch
 
 import numpy as np
@@ -41,7 +40,6 @@ from ax.models.torch.botorch_moo_defaults import (
 from ax.service.utils.report_utils import exp_to_df
 from ax.utils.common.random import set_rng_seed
 from ax.utils.common.testutils import TestCase
-from ax.utils.common.typeutils import checked_cast, not_none
 from ax.utils.testing.core_stubs import (
     get_branin_data_multi_objective,
     get_branin_experiment_with_multi_objective,
@@ -50,9 +48,10 @@ from ax.utils.testing.core_stubs import (
     get_non_monolithic_branin_moo_data,
     TEST_SOBOL_SEED,
 )
-from ax.utils.testing.mock import fast_botorch_optimize
+from ax.utils.testing.mock import mock_botorch_optimize
 from ax.utils.testing.modeling_stubs import transform_1, transform_2
 from botorch.utils.multi_objective.pareto import is_non_dominated
+from pyre_extensions import assert_is_instance, none_throws
 
 PARETO_FRONTIER_EVALUATOR_PATH = (
     f"{get_pareto_frontier_and_configs.__module__}.pareto_frontier_evaluator"
@@ -67,9 +66,9 @@ class MultiObjectiveTorchModelBridgeTest(TestCase):
         f"{STUBS_PATH}.BraninMetric.is_available_while_running",
         return_value=False,
     )
-    @fast_botorch_optimize
+    @mock_botorch_optimize
     def helper_test_pareto_frontier(
-        self, _, outcome_constraints: Optional[list[OutcomeConstraint]]
+        self, _, outcome_constraints: list[OutcomeConstraint] | None
     ) -> None:
         """
         Make sure Pareto-related functions run.
@@ -82,7 +81,7 @@ class MultiObjectiveTorchModelBridgeTest(TestCase):
         )
         for trial in exp.trials.values():
             trial.mark_running(no_runner_required=True).mark_completed()
-        metrics_dict = not_none(exp.optimization_config).metrics
+        metrics_dict = none_throws(exp.optimization_config).metrics
         objective_bound = 5.0
         objective_thresholds = [
             ObjectiveThreshold(
@@ -191,7 +190,9 @@ class MultiObjectiveTorchModelBridgeTest(TestCase):
         self.assertTrue(torch.equal(obj_w[:2], -torch.ones(2, dtype=torch.double)))
         self.assertTrue(obj_t is not None)
         self.assertTrue(
-            torch.equal(not_none(obj_t)[:2], torch.full((2,), 5.0, dtype=torch.double))
+            torch.equal(
+                none_throws(obj_t)[:2], torch.full((2,), 5.0, dtype=torch.double)
+            )
         )
         observed_frontier2 = pareto_frontier(
             modelbridge=modelbridge,
@@ -203,8 +204,8 @@ class MultiObjectiveTorchModelBridgeTest(TestCase):
         self.assertEqual(observed_frontier, observed_frontier2)
 
         # Remove the thresholds for testing None handling.
-        checked_cast(
-            MultiObjectiveOptimizationConfig, modelbridge._optimization_config
+        assert_is_instance(
+            modelbridge._optimization_config, MultiObjectiveOptimizationConfig
         )._objective_thresholds = []
         with patch(
             PARETO_FRONTIER_EVALUATOR_PATH, wraps=pareto_frontier_evaluator
@@ -248,15 +249,14 @@ class MultiObjectiveTorchModelBridgeTest(TestCase):
                     outcome_constraints=outcome_constraints
                 )
 
-    @fast_botorch_optimize
+    @mock_botorch_optimize
     def test_get_pareto_frontier_and_configs_input_validation(self) -> None:
-
         exp = get_branin_experiment_with_multi_objective(
             has_optimization_config=True, with_batch=True
         )
         for trial in exp.trials.values():
             trial.mark_running(no_runner_required=True).mark_completed()
-        metrics_dict = not_none(exp.optimization_config).metrics
+        metrics_dict = none_throws(exp.optimization_config).metrics
         objective_thresholds = [
             ObjectiveThreshold(
                 metric=metrics_dict[f"branin_{letter}"],
@@ -430,7 +430,7 @@ class MultiObjectiveTorchModelBridgeTest(TestCase):
         f"{STUBS_PATH}.BraninMetric.is_available_while_running",
         return_value=False,
     )
-    @fast_botorch_optimize
+    @mock_botorch_optimize
     def test_infer_objective_thresholds(self, _, cuda: bool = False) -> None:
         # lightweight test
         exp = get_branin_experiment_with_multi_objective(
@@ -459,13 +459,13 @@ class MultiObjectiveTorchModelBridgeTest(TestCase):
             ParameterConstraint(constraint_dict={"x1": 1.0}, bound=10.0)
         ]
         search_space.add_parameter_constraints(param_constraints)
-        oc = not_none(exp.optimization_config).clone()
+        oc = none_throws(exp.optimization_config).clone()
         oc.objective._objectives[0].minimize = True
 
         for use_partial_thresholds in (False, True):
             if use_partial_thresholds:
-                checked_cast(
-                    MultiObjectiveOptimizationConfig, oc
+                assert_is_instance(
+                    oc, MultiObjectiveOptimizationConfig
                 )._objective_thresholds = [
                     ObjectiveThreshold(
                         metric=oc.objective.metrics[0],
@@ -706,7 +706,7 @@ class MultiObjectiveTorchModelBridgeTest(TestCase):
         self.assertFalse(obj_thresholds[0].relative)
         self.assertFalse(obj_thresholds[1].relative)
 
-    @fast_botorch_optimize
+    @mock_botorch_optimize
     def test_status_quo_for_non_monolithic_data(self) -> None:
         exp = get_branin_experiment_with_multi_objective(with_status_quo=True)
         sobol_generator = get_sobol(

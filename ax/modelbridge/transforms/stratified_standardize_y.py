@@ -8,7 +8,7 @@
 
 from collections import defaultdict
 from logging import Logger
-from typing import Optional, TYPE_CHECKING, Union
+from typing import Optional, TYPE_CHECKING
 
 import numpy as np
 from ax.core.observation import Observation, ObservationFeatures, separate_observations
@@ -21,7 +21,7 @@ from ax.modelbridge.transforms.base import Transform
 from ax.modelbridge.transforms.standardize_y import compute_standardization_parameters
 from ax.models.types import TConfig
 from ax.utils.common.logger import get_logger
-from ax.utils.common.typeutils import checked_cast, not_none
+from pyre_extensions import assert_is_instance, none_throws
 
 
 if TYPE_CHECKING:
@@ -49,10 +49,10 @@ class StratifiedStandardizeY(Transform):
 
     def __init__(
         self,
-        search_space: Optional[SearchSpace] = None,
-        observations: Optional[list[Observation]] = None,
+        search_space: SearchSpace | None = None,
+        observations: list[Observation] | None = None,
         modelbridge: Optional["modelbridge_module.base.ModelBridge"] = None,
-        config: Optional[TConfig] = None,
+        config: TConfig | None = None,
     ) -> None:
         """Initialize StratifiedStandardizeY.
 
@@ -83,7 +83,7 @@ class StratifiedStandardizeY(Transform):
             if "strata_mapping" in config:
                 # pyre-ignore [8]
                 self.strata_mapping: dict[
-                    Union[bool, float, int, str], Union[bool, float, int, str]
+                    bool | float | int | str, bool | float | int | str
                 ] = config["strata_mapping"]
                 if set(strat_p.values) != set(self.strata_mapping.keys()):
                     raise ValueError(
@@ -108,8 +108,8 @@ class StratifiedStandardizeY(Transform):
                 )
             self.p_name = task_parameters[0]
         if self.strata_mapping is None:
-            strat_p = checked_cast(
-                ChoiceParameter, search_space.parameters[self.p_name]
+            strat_p = assert_is_instance(
+                search_space.parameters[self.p_name], ChoiceParameter
             )
             # pyre-ignore [8]
             self.strata_mapping = {v: v for v in strat_p.values}
@@ -117,7 +117,7 @@ class StratifiedStandardizeY(Transform):
         observation_features, observation_data = separate_observations(observations)
         Ys: defaultdict[tuple[str, TParamValue], list[float]] = defaultdict(list)
         for j, obsd in enumerate(observation_data):
-            v = not_none(observation_features[j].parameters[self.p_name])
+            v = none_throws(observation_features[j].parameters[self.p_name])
             strata = self.strata_mapping[v]
             for i, m in enumerate(obsd.metric_names):
                 Ys[(m, strata)].append(obsd.means[i])
@@ -137,7 +137,7 @@ class StratifiedStandardizeY(Transform):
     ) -> list[Observation]:
         # Transform observations
         for obs in observations:
-            v = not_none(obs.features.parameters[self.p_name])
+            v = none_throws(obs.features.parameters[self.p_name])
             strata = self.strata_mapping[v]
             means = np.array([self.Ymean[(m, strata)] for m in obs.data.metric_names])
             stds = np.array([self.Ystd[(m, strata)] for m in obs.data.metric_names])
@@ -149,7 +149,7 @@ class StratifiedStandardizeY(Transform):
         self,
         optimization_config: OptimizationConfig,
         modelbridge: Optional["modelbridge_module.base.ModelBridge"] = None,
-        fixed_features: Optional[ObservationFeatures] = None,
+        fixed_features: ObservationFeatures | None = None,
     ) -> OptimizationConfig:
         if len(optimization_config.all_constraints) == 0:
             return optimization_config
@@ -158,7 +158,7 @@ class StratifiedStandardizeY(Transform):
                 f"StratifiedStandardizeY transform requires {self.p_name} to be fixed "
                 "during generation."
             )
-        v = not_none(fixed_features.parameters[self.p_name])
+        v = none_throws(fixed_features.parameters[self.p_name])
         strata = self.strata_mapping[v]
         for c in optimization_config.all_constraints:
             if c.relative:
@@ -176,7 +176,7 @@ class StratifiedStandardizeY(Transform):
         observations: list[Observation],
     ) -> list[Observation]:
         for obs in observations:
-            v = not_none(obs.features.parameters[self.p_name])
+            v = none_throws(obs.features.parameters[self.p_name])
             strata = self.strata_mapping[v]
             means = np.array([self.Ymean[(m, strata)] for m in obs.data.metric_names])
             stds = np.array([self.Ystd[(m, strata)] for m in obs.data.metric_names])
@@ -187,13 +187,13 @@ class StratifiedStandardizeY(Transform):
     def untransform_outcome_constraints(
         self,
         outcome_constraints: list[OutcomeConstraint],
-        fixed_features: Optional[ObservationFeatures] = None,
+        fixed_features: ObservationFeatures | None = None,
     ) -> list[OutcomeConstraint]:
         if fixed_features is None or self.p_name not in fixed_features.parameters:
             raise ValueError(
                 f"StratifiedStandardizeY requires {self.p_name} to be fixed here"
             )
-        v = not_none(fixed_features.parameters[self.p_name])
+        v = none_throws(fixed_features.parameters[self.p_name])
         strata = self.strata_mapping[v]
         for c in outcome_constraints:
             if c.relative:

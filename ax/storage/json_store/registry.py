@@ -7,22 +7,22 @@
 # pyre-strict
 
 import pathlib
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import torch
 from ax.benchmark.benchmark_method import BenchmarkMethod
-from ax.benchmark.benchmark_metric import BenchmarkMetric
-from ax.benchmark.benchmark_problem import BenchmarkProblem
-from ax.benchmark.benchmark_result import AggregatedBenchmarkResult, BenchmarkResult
-from ax.benchmark.problems.hpo.torchvision import PyTorchCNNTorchvisionParamBasedProblem
-from ax.benchmark.runners.botorch_test import (
-    BotorchTestProblemRunner,
-    ParamBasedTestProblemRunner,
+from ax.benchmark.benchmark_metric import (
+    BenchmarkMapMetric,
+    BenchmarkMapUnavailableWhileRunningMetric,
+    BenchmarkMetric,
+    BenchmarkTimeVaryingMetric,
 )
-from ax.benchmark.runners.surrogate import SurrogateRunner
+from ax.benchmark.benchmark_result import AggregatedBenchmarkResult, BenchmarkResult
+from ax.benchmark.benchmark_trial_metadata import BenchmarkTrialMetadata
 from ax.core import Experiment, ObservationFeatures
 from ax.core.arm import Arm
-from ax.core.auxiliary import AuxiliaryExperiment
+from ax.core.auxiliary import AuxiliaryExperiment, AuxiliaryExperimentPurpose
 from ax.core.base_trial import TrialStatus
 from ax.core.batch_trial import (
     AbandonedArm,
@@ -68,11 +68,11 @@ from ax.early_stopping.strategies.logical import (
     OrEarlyStoppingStrategy,
 )
 from ax.global_stopping.strategies.improvement import ImprovementGlobalStoppingStrategy
-from ax.metrics.branin import AugmentedBraninMetric, BraninMetric, NegativeBraninMetric
+from ax.metrics.branin import BraninMetric, NegativeBraninMetric
 from ax.metrics.branin_map import BraninTimestampMapMetric
 from ax.metrics.chemistry import ChemistryMetric, ChemistryProblemType
 from ax.metrics.factorial import FactorialMetric
-from ax.metrics.hartmann6 import AugmentedHartmann6Metric, Hartmann6Metric
+from ax.metrics.hartmann6 import Hartmann6Metric
 from ax.metrics.l2norm import L2NormMetric
 from ax.metrics.noisy_function import NoisyFunctionMetric
 from ax.metrics.sklearn import SklearnDataset, SklearnMetric, SklearnModelType
@@ -82,12 +82,18 @@ from ax.modelbridge.best_model_selector import (
 )
 from ax.modelbridge.factory import Models
 from ax.modelbridge.generation_node import GenerationNode, GenerationStep
+from ax.modelbridge.generation_node_input_constructors import (
+    InputConstructorPurpose,
+    NodeInputConstructors,
+)
 from ax.modelbridge.generation_strategy import GenerationStrategy
 from ax.modelbridge.model_spec import ModelSpec
 from ax.modelbridge.registry import ModelRegistryBase
 from ax.modelbridge.transforms.base import Transform
 from ax.modelbridge.transition_criterion import (
     AutoTransitionAfterGen,
+    AuxiliaryExperimentCheck,
+    IsSingleObjective,
     MaxGenerationParallelism,
     MaxTrials,
     MinimumPreferenceOccurances,
@@ -96,8 +102,9 @@ from ax.modelbridge.transition_criterion import (
     TransitionCriterion,
 )
 from ax.models.torch.botorch_modular.acquisition import Acquisition
-from ax.models.torch.botorch_modular.model import BoTorchModel, SurrogateSpec
-from ax.models.torch.botorch_modular.surrogate import Surrogate
+from ax.models.torch.botorch_modular.model import BoTorchModel
+from ax.models.torch.botorch_modular.surrogate import Surrogate, SurrogateSpec
+from ax.models.torch.botorch_modular.utils import ModelConfig
 from ax.models.winsorization_config import WinsorizationConfig
 from ax.runners.synthetic import SyntheticRunner
 from ax.service.utils.scheduler_options import SchedulerOptions, TrialType
@@ -112,6 +119,7 @@ from ax.storage.json_store.decoders import (
 from ax.storage.json_store.encoders import (
     arm_to_dict,
     auxiliary_experiment_to_dict,
+    backend_simulator_to_dict,
     batch_to_dict,
     best_model_selector_to_dict,
     botorch_component_to_dict,
@@ -159,7 +167,13 @@ from ax.storage.json_store.encoders import (
     winsorization_config_to_dict,
 )
 from ax.storage.utils import DomainType, ParameterConstraintType
+from ax.utils.common.constants import Keys
 from ax.utils.common.serialization import TDecoderRegistry
+from ax.utils.testing.backend_simulator import (
+    BackendSimulator,
+    BackendSimulatorOptions,
+    SimTrial,
+)
 from botorch.acquisition.acquisition import AcquisitionFunction
 from botorch.models.model import Model
 from botorch.models.transforms.input import ChainedInputTransform, Normalize, Round
@@ -178,13 +192,14 @@ CORE_ENCODER_REGISTRY: dict[type, Callable[[Any], dict[str, Any]]] = {
     Arm: arm_to_dict,
     AuxiliaryExperiment: auxiliary_experiment_to_dict,
     AndEarlyStoppingStrategy: logical_early_stopping_strategy_to_dict,
-    AugmentedBraninMetric: metric_to_dict,
-    AugmentedHartmann6Metric: metric_to_dict,
     AutoTransitionAfterGen: transition_criterion_to_dict,
+    BackendSimulator: backend_simulator_to_dict,
     BatchTrial: batch_to_dict,
     BenchmarkMetric: metric_to_dict,
+    BenchmarkMapMetric: metric_to_dict,
+    BenchmarkTimeVaryingMetric: metric_to_dict,
+    BenchmarkMapUnavailableWhileRunningMetric: metric_to_dict,
     BoTorchModel: botorch_model_to_dict,
-    BotorchTestProblemRunner: runner_to_dict,
     BraninMetric: metric_to_dict,
     BraninTimestampMapMetric: metric_to_dict,
     ChainedInputTransform: botorch_component_to_dict,
@@ -201,6 +216,7 @@ CORE_ENCODER_REGISTRY: dict[type, Callable[[Any], dict[str, Any]]] = {
     Hartmann6Metric: metric_to_dict,
     ImprovementGlobalStoppingStrategy: improvement_global_stopping_strategy_to_dict,
     Interval: botorch_component_to_dict,
+    IsSingleObjective: transition_criterion_to_dict,
     L2NormMetric: metric_to_dict,
     LogNormalPrior: botorch_component_to_dict,
     MapData: map_data_to_dict,
@@ -212,6 +228,7 @@ CORE_ENCODER_REGISTRY: dict[type, Callable[[Any], dict[str, Any]]] = {
     MinTrials: transition_criterion_to_dict,
     MinimumTrialsInStatus: transition_criterion_to_dict,
     MinimumPreferenceOccurances: transition_criterion_to_dict,
+    AuxiliaryExperimentCheck: transition_criterion_to_dict,
     ModelSpec: model_spec_to_dict,
     MultiObjective: multi_objective_to_dict,
     MultiObjectiveOptimizationConfig: multi_objective_optimization_config_to_dict,
@@ -228,7 +245,6 @@ CORE_ENCODER_REGISTRY: dict[type, Callable[[Any], dict[str, Any]]] = {
     OrEarlyStoppingStrategy: logical_early_stopping_strategy_to_dict,
     OrderConstraint: order_parameter_constraint_to_dict,
     OutcomeConstraint: outcome_constraint_to_dict,
-    ParamBasedTestProblemRunner: runner_to_dict,
     ParameterConstraint: parameter_constraint_to_dict,
     ParameterDistribution: parameter_distribution_to_dict,
     pathlib.Path: pathlib_to_dict,
@@ -249,8 +265,6 @@ CORE_ENCODER_REGISTRY: dict[type, Callable[[Any], dict[str, Any]]] = {
     SobolQMCNormalSampler: botorch_component_to_dict,
     SumConstraint: sum_parameter_constraint_to_dict,
     Surrogate: surrogate_to_dict,
-    BenchmarkMetric: metric_to_dict,
-    SurrogateRunner: runner_to_dict,
     SyntheticRunner: runner_to_dict,
     ThresholdEarlyStoppingStrategy: threshold_early_stopping_strategy_to_dict,
     Trial: trial_to_dict,
@@ -281,20 +295,24 @@ CORE_CLASS_ENCODER_REGISTRY: dict[type, Callable[[Any], dict[str, Any]]] = {
 CORE_DECODER_REGISTRY: TDecoderRegistry = {
     "AbandonedArm": AbandonedArm,
     "AndEarlyStoppingStrategy": AndEarlyStoppingStrategy,
-    "AugmentedBraninMetric": AugmentedBraninMetric,
-    "AugmentedHartmann6Metric": AugmentedHartmann6Metric,
     "AutoTransitionAfterGen": AutoTransitionAfterGen,
     "AuxiliaryExperiment": AuxiliaryExperiment,
+    "AuxiliaryExperimentPurpose": AuxiliaryExperimentPurpose,
     "Arm": Arm,
     "AggregatedBenchmarkResult": AggregatedBenchmarkResult,
+    "BackendSimulator": BackendSimulator,
+    "BackendSimulatorOptions": BackendSimulatorOptions,
     "BatchTrial": BatchTrial,
     "BenchmarkMethod": BenchmarkMethod,
     "BenchmarkMetric": BenchmarkMetric,
-    "BenchmarkProblem": BenchmarkProblem,
+    "BenchmarkMapMetric": BenchmarkMapMetric,
+    "BenchmarkTimeVaryingMetric": BenchmarkTimeVaryingMetric,
+    "BenchmarkMapUnavailableWhileRunningMetric": (
+        BenchmarkMapUnavailableWhileRunningMetric
+    ),
     "BenchmarkResult": BenchmarkResult,
+    "BenchmarkTrialMetadata": BenchmarkTrialMetadata,
     "BoTorchModel": BoTorchModel,
-    "BotorchTestProblemMetric": BenchmarkMetric,  # backward-compatibility
-    "BotorchTestProblemRunner": BotorchTestProblemRunner,
     "BraninMetric": BraninMetric,
     "BraninTimestampMapMetric": BraninTimestampMapMetric,
     "ChainedInputTransform": ChainedInputTransform,
@@ -317,7 +335,10 @@ CORE_DECODER_REGISTRY: TDecoderRegistry = {
     "Hartmann6Metric": Hartmann6Metric,
     "HierarchicalSearchSpace": HierarchicalSearchSpace,
     "ImprovementGlobalStoppingStrategy": ImprovementGlobalStoppingStrategy,
+    "InputConstructorPurpose": InputConstructorPurpose,
     "Interval": Interval,
+    "IsSingleObjective": IsSingleObjective,
+    "Keys": Keys,
     "LifecycleStage": LifecycleStage,
     "ListSurrogate": Surrogate,  # For backwards compatibility
     "L2NormMetric": L2NormMetric,
@@ -331,14 +352,16 @@ CORE_DECODER_REGISTRY: TDecoderRegistry = {
     "MinTrials": MinTrials,
     "MinimumTrialsInStatus": MinimumTrialsInStatus,
     "MinimumPreferenceOccurances": MinimumPreferenceOccurances,
+    "AuxiliaryExperimentCheck": AuxiliaryExperimentCheck,
     "Models": Models,
     "ModelRegistryBase": ModelRegistryBase,
+    "ModelConfig": ModelConfig,
     "ModelSpec": ModelSpec,
     "MultiObjective": MultiObjective,
-    "MultiObjectiveBenchmarkProblem": BenchmarkProblem,  # backward compatibility
     "MultiObjectiveOptimizationConfig": MultiObjectiveOptimizationConfig,
     "MultiTypeExperiment": MultiTypeExperiment,
     "NegativeBraninMetric": NegativeBraninMetric,
+    "NodeInputConstructors": NodeInputConstructors,
     "NoisyFunctionMetric": NoisyFunctionMetric,
     "Normalize": Normalize,
     "Objective": Objective,
@@ -347,7 +370,6 @@ CORE_DECODER_REGISTRY: TDecoderRegistry = {
     "OrEarlyStoppingStrategy": OrEarlyStoppingStrategy,
     "OrderConstraint": OrderConstraint,
     "OutcomeConstraint": OutcomeConstraint,
-    "ParamBasedTestProblemRunner": ParamBasedTestProblemRunner,
     "ParameterConstraint": ParameterConstraint,
     "ParameterConstraintType": ParameterConstraintType,
     "ParameterDistribution": ParameterDistribution,
@@ -359,7 +381,6 @@ CORE_DECODER_REGISTRY: TDecoderRegistry = {
     "PurePosixPath": pathlib_from_json,
     "PureWindowsPath": pathlib_from_json,
     "PercentileEarlyStoppingStrategy": PercentileEarlyStoppingStrategy,
-    "PyTorchCNNTorchvisionParamBasedProblem": PyTorchCNNTorchvisionParamBasedProblem,
     "RangeParameter": RangeParameter,
     "ReductionCriterion": ReductionCriterion,
     "RiskMeasure": RiskMeasure,
@@ -368,6 +389,7 @@ CORE_DECODER_REGISTRY: TDecoderRegistry = {
     "ScalarizedObjective": ScalarizedObjective,
     "SchedulerOptions": SchedulerOptions,
     "SearchSpace": SearchSpace,
+    "SimTrial": SimTrial,
     "SingleDiagnosticBestModelSelector": SingleDiagnosticBestModelSelector,
     "SklearnDataset": SklearnDataset,
     "SklearnMetric": SklearnMetric,
@@ -375,8 +397,6 @@ CORE_DECODER_REGISTRY: TDecoderRegistry = {
     "SumConstraint": SumConstraint,
     "Surrogate": Surrogate,
     "SurrogateMetric": BenchmarkMetric,  # backward-compatiblity
-    # NOTE: SurrogateRunners -> SyntheticRunner on load due to complications
-    "SurrogateRunner": SyntheticRunner,
     "SobolQMCNormalSampler": SobolQMCNormalSampler,
     "SyntheticRunner": SyntheticRunner,
     "SurrogateSpec": SurrogateSpec,

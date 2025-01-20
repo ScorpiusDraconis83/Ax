@@ -12,7 +12,7 @@ from functools import partial
 
 from logging import Logger
 
-from typing import Any, Optional, TYPE_CHECKING, Union
+from typing import Any, TYPE_CHECKING
 
 from ax.core.arm import Arm
 from ax.core.base_trial import BaseTrial, immutable_once_run
@@ -22,8 +22,7 @@ from ax.core.types import TCandidateMetadata, TEvaluationOutcome
 from ax.exceptions.core import UnsupportedError
 from ax.utils.common.docutils import copy_doc
 from ax.utils.common.logger import _round_floats_for_logging, get_logger
-from ax.utils.common.typeutils import not_none
-from pyre_extensions import override
+from pyre_extensions import none_throws, override
 
 logger: Logger = get_logger(__name__)
 
@@ -66,10 +65,10 @@ class Trial(BaseTrial):
     def __init__(
         self,
         experiment: core.experiment.Experiment,
-        generator_run: Optional[GeneratorRun] = None,
-        trial_type: Optional[str] = None,
-        ttl_seconds: Optional[int] = None,
-        index: Optional[int] = None,
+        generator_run: GeneratorRun | None = None,
+        trial_type: str | None = None,
+        ttl_seconds: int | None = None,
+        index: int | None = None,
     ) -> None:
         super().__init__(
             experiment=experiment,
@@ -83,7 +82,7 @@ class Trial(BaseTrial):
             self.add_generator_run(generator_run=generator_run)
 
     @property
-    def generator_run(self) -> Optional[GeneratorRun]:
+    def generator_run(self) -> GeneratorRun | None:
         """Generator run attached to this trial."""
         return self._generator_run
 
@@ -95,12 +94,12 @@ class Trial(BaseTrial):
         return [gr] if gr is not None else []
 
     @property
-    def arm(self) -> Optional[Arm]:
+    def arm(self) -> Arm | None:
         """The arm associated with this batch."""
         if self.generator_run is None:
             return None
 
-        generator_run = not_none(self.generator_run)
+        generator_run = none_throws(self.generator_run)
         if len(generator_run.arms) == 0:
             return None
         elif len(generator_run.arms) > 1:
@@ -112,7 +111,7 @@ class Trial(BaseTrial):
 
     @immutable_once_run
     def add_arm(
-        self, arm: Arm, candidate_metadata: Optional[dict[str, Any]] = None
+        self, arm: Arm, candidate_metadata: dict[str, Any] | None = None
     ) -> Trial:
         """Add arm to the trial.
 
@@ -193,7 +192,7 @@ class Trial(BaseTrial):
     def abandoned_arms(self) -> list[Arm]:
         """Abandoned arms attached to this trial."""
         return (
-            [not_none(self.arm)]
+            [none_throws(self.arm)]
             if self.generator_run is not None
             and self.arm is not None
             and self.is_abandoned
@@ -251,7 +250,7 @@ class Trial(BaseTrial):
         if gr is None or gr.candidate_metadata_by_arm_signature is None:
             return {}
 
-        cand_metadata = not_none(gr.candidate_metadata_by_arm_signature)
+        cand_metadata = none_throws(gr.candidate_metadata_by_arm_signature)
         return {a.name: cand_metadata.get(a.signature) for a in gr.arms}
 
     def _get_candidate_metadata(self, arm_name: str) -> TCandidateMetadata:
@@ -267,7 +266,7 @@ class Trial(BaseTrial):
             return None
 
         arm = gr.arms[0]
-        return not_none(gr.candidate_metadata_by_arm_signature).get(arm.signature)
+        return none_throws(gr.candidate_metadata_by_arm_signature).get(arm.signature)
 
     def validate_data_for_trial(self, data: Data) -> None:
         """Utility method to validate data before further processing."""
@@ -286,8 +285,8 @@ class Trial(BaseTrial):
     def update_trial_data(
         self,
         raw_data: TEvaluationOutcome,
-        metadata: Optional[dict[str, Union[str, int]]] = None,
-        sample_size: Optional[int] = None,
+        metadata: dict[str, str | int] | None = None,
+        sample_size: int | None = None,
         combine_with_last_data: bool = False,
     ) -> str:
         """Utility method that attaches data to a trial and
@@ -310,7 +309,7 @@ class Trial(BaseTrial):
         Returns:
             A string message summarizing the update.
         """
-        arm_name = not_none(self.arm).name
+        arm_name = none_throws(self.arm).name
         sample_sizes = {arm_name: sample_size} if sample_size else {}
         raw_data_by_arm = {arm_name: raw_data}
 
@@ -333,7 +332,8 @@ class Trial(BaseTrial):
 
     def clone_to(
         self,
-        experiment: Optional[core.experiment.Experiment] = None,
+        experiment: core.experiment.Experiment | None = None,
+        clear_trial_type: bool = False,
     ) -> Trial:
         """Clone the trial and attach it to the specified experiment.
         If no experiment is provided, the original experiment will be used.
@@ -341,13 +341,16 @@ class Trial(BaseTrial):
         Args:
             experiment: The experiment to which the cloned trial will belong.
                 If unspecified, uses the current experiment.
+            clear_trial_type: If True, all cloned trials on the cloned experiment have
+                `trial_type` set to `None`.
 
         Returns:
             A new instance of the trial.
         """
         experiment = self._experiment if experiment is None else experiment
         new_trial = experiment.new_trial(
-            ttl_seconds=self.ttl_seconds, trial_type=self.trial_type
+            ttl_seconds=self.ttl_seconds,
+            trial_type=None if clear_trial_type else self.trial_type,
         )
         if self.generator_run is not None:
             new_trial.add_generator_run(self.generator_run.clone())

@@ -19,7 +19,6 @@ from ax.exceptions.core import DataRequiredError
 from ax.service.utils.best_point import extract_Y_from_data
 from ax.service.utils.best_point_mixin import BestPointMixin
 from ax.utils.common.testutils import TestCase
-from ax.utils.common.typeutils import checked_cast, not_none
 from ax.utils.testing.core_stubs import (
     get_arm_weights2,
     get_arms_from_dict,
@@ -27,6 +26,7 @@ from ax.utils.testing.core_stubs import (
     get_experiment_with_observations,
     get_experiment_with_trial,
 )
+from pyre_extensions import assert_is_instance, none_throws
 
 
 class TestBestPointMixin(TestCase):
@@ -40,7 +40,7 @@ class TestBestPointMixin(TestCase):
         )
         self.assertEqual(get_trace(exp), [11, 10, 9, 9, 5])
         # Same experiment with maximize via new optimization config.
-        opt_conf = not_none(exp.optimization_config).clone()
+        opt_conf = none_throws(exp.optimization_config).clone()
         opt_conf.objective.minimize = False
         self.assertEqual(get_trace(exp, opt_conf), [11, 11, 11, 15, 15])
 
@@ -58,8 +58,8 @@ class TestBestPointMixin(TestCase):
         self.assertEqual(get_trace(exp), [1, 1, 2, 9, 11, 11])
 
         # W/o ObjectiveThresholds (infering ObjectiveThresholds from nadir point)
-        checked_cast(
-            MultiObjectiveOptimizationConfig, exp.optimization_config
+        assert_is_instance(
+            exp.optimization_config, MultiObjectiveOptimizationConfig
         ).objective_thresholds = []
         self.assertEqual(get_trace(exp), [0.0, 0.0, 2.0, 8.0, 11.0, 11.0])
 
@@ -126,7 +126,7 @@ class TestBestPointMixin(TestCase):
         self.assertEqual(get_trace(exp), [len(trial.arms) - 1])
         # test that there is performance metric in the trace for each
         # completed/early-stopped trial
-        trial1 = checked_cast(BatchTrial, trial).clone_to()
+        trial1 = assert_is_instance(trial, BatchTrial).clone_to()
         trial1.mark_abandoned(unsafe=True)
         arms = get_arms_from_dict(get_arm_weights2())
         trial2 = exp.new_batch_trial(GeneratorRun(arms))
@@ -163,7 +163,7 @@ class TestBestPointMixin(TestCase):
         )
         self.assertEqual(get_best(exp), 5)
         # Same experiment with maximize via new optimization config.
-        opt_conf = not_none(exp.optimization_config).clone()
+        opt_conf = none_throws(exp.optimization_config).clone()
         opt_conf.objective.minimize = False
         self.assertEqual(get_best(exp, opt_conf), 15)
 

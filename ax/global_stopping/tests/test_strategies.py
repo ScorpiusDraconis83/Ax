@@ -30,8 +30,8 @@ from ax.global_stopping.strategies.improvement import (
     ImprovementGlobalStoppingStrategy,
 )
 from ax.utils.common.testutils import TestCase
-from ax.utils.common.typeutils import checked_cast, not_none
 from ax.utils.testing.core_stubs import get_experiment, get_experiment_with_data
+from pyre_extensions import assert_is_instance, none_throws
 
 
 class TestImprovementGlobalStoppingStrategy(TestCase):
@@ -67,7 +67,7 @@ class TestImprovementGlobalStoppingStrategy(TestCase):
 
         # Check that we properly count completed trials.
         for i in range(4):
-            trial = checked_cast(BatchTrial, exp.trials[0]).clone_to()
+            trial = assert_is_instance(exp.trials[0], BatchTrial).clone_to()
             if i < 3:
                 trial._status = TrialStatus.CANDIDATE
         stop, message = gss.should_stop_optimization(experiment=exp)
@@ -110,21 +110,21 @@ class TestImprovementGlobalStoppingStrategy(TestCase):
             {
                 "trial_index": trial.index,
                 "metric_name": "m1",
-                "arm_name": not_none(trial.arm).name,
+                "arm_name": none_throws(trial.arm).name,
                 "mean": values[0],
                 "sem": 0.0,
             },
             {
                 "trial_index": trial.index,
                 "metric_name": "m2",
-                "arm_name": not_none(trial.arm).name,
+                "arm_name": none_throws(trial.arm).name,
                 "mean": values[1],
                 "sem": 0.0,
             },
             {
                 "trial_index": trial.index,
                 "metric_name": "m3",
-                "arm_name": not_none(trial.arm).name,
+                "arm_name": none_throws(trial.arm).name,
                 "mean": values[2],
                 "sem": 0.0,
             },
@@ -319,8 +319,8 @@ class TestImprovementGlobalStoppingStrategy(TestCase):
         )
 
         # Test with no objective thresholds specified.
-        checked_cast(
-            MultiObjectiveOptimizationConfig, exp._optimization_config
+        assert_is_instance(
+            exp._optimization_config, MultiObjectiveOptimizationConfig
         )._objective_thresholds = []
         stop, message = gss.should_stop_optimization(
             experiment=exp,
@@ -384,3 +384,9 @@ class TestImprovementGlobalStoppingStrategy(TestCase):
         self.assertFalse(constraint_satisfaction(exp.trials[1]))
         self.assertFalse(constraint_satisfaction(exp.trials[2]))
         self.assertFalse(constraint_satisfaction(exp.trials[3]))
+
+    def test_global_stopping_savings(self) -> None:
+        exp = get_experiment_with_data()
+        gss = ImprovementGlobalStoppingStrategy(min_trials=1)
+
+        self.assertEqual(gss.estimate_global_stopping_savings(exp, 1), 0.5)

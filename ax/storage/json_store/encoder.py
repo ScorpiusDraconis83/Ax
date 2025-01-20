@@ -10,8 +10,9 @@ import dataclasses
 import datetime
 import enum
 from collections import OrderedDict
+from collections.abc import Callable
 from inspect import isclass
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -65,7 +66,6 @@ def object_to_json(  # noqa C901
     if isclass(obj):
         for class_type in class_encoder_registry:
             if issubclass(obj, class_type):
-
                 obj_dict = class_encoder_registry[class_type](obj)
                 return {
                     k: object_to_json(

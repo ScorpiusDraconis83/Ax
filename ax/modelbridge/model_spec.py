@@ -10,9 +10,10 @@ from __future__ import annotations
 
 import json
 import warnings
+from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import Any
 
 from ax.core.data import Data
 from ax.core.experiment import Experiment
@@ -20,7 +21,7 @@ from ax.core.generator_run import GeneratorRun
 from ax.core.observation import ObservationFeatures
 from ax.core.optimization_config import OptimizationConfig
 from ax.core.search_space import SearchSpace
-from ax.exceptions.core import UserInputError
+from ax.exceptions.core import AxWarning, UserInputError
 from ax.modelbridge.base import ModelBridge
 from ax.modelbridge.cross_validation import (
     compute_diagnostics,
@@ -37,7 +38,7 @@ from ax.utils.common.kwargs import (
     get_function_argument_names,
 )
 from ax.utils.common.serialization import SerializationMixin
-from ax.utils.common.typeutils import not_none
+from pyre_extensions import none_throws
 
 
 TModelFactory = Callable[..., ModelBridge]
@@ -61,22 +62,25 @@ class ModelSpec(SortableBase, SerializationMixin):
     model_gen_kwargs: dict[str, Any] = field(default_factory=dict)
     # Kwargs to pass to `cross_validate`.
     model_cv_kwargs: dict[str, Any] = field(default_factory=dict)
+    # An optional override for the model key. Each `ModelSpec` in a
+    # `GenerationNode` must have a unique key to ensure identifiability.
+    model_key_override: str | None = None
 
     # Fitted model, constructed using specified `model_kwargs` and `Data`
     # on `ModelSpec.fit`
-    _fitted_model: Optional[ModelBridge] = None
+    _fitted_model: ModelBridge | None = None
 
     # Stored cross validation results set in cross validate.
-    _cv_results: Optional[list[CVResult]] = None
+    _cv_results: list[CVResult] | None = None
 
     # Stored cross validation diagnostics set in cross validate.
-    _diagnostics: Optional[CVDiagnostics] = None
+    _diagnostics: CVDiagnostics | None = None
 
     # Stored to check if the CV result & diagnostic cache is safe to reuse.
-    _last_cv_kwargs: Optional[dict[str, Any]] = None
+    _last_cv_kwargs: dict[str, Any] | None = None
 
     # Stored to check if the model can be safely updated in fit.
-    _last_fit_arg_ids: Optional[dict[str, int]] = None
+    _last_fit_arg_ids: dict[str, int] | None = None
 
     def __post_init__(self) -> None:
         self.model_kwargs = self.model_kwargs or {}
@@ -87,17 +91,17 @@ class ModelSpec(SortableBase, SerializationMixin):
     def fitted_model(self) -> ModelBridge:
         """Returns the fitted Ax model, asserting fit() was called"""
         self._assert_fitted()
-        return not_none(self._fitted_model)
+        return none_throws(self._fitted_model)
 
     @property
-    def fixed_features(self) -> Optional[ObservationFeatures]:
+    def fixed_features(self) -> ObservationFeatures | None:
         """
         Fixed generation features to pass into the Model's `.gen` function.
         """
         return self.model_gen_kwargs.get("fixed_features", None)
 
     @fixed_features.setter
-    def fixed_features(self, value: Optional[ObservationFeatures]) -> None:
+    def fixed_features(self, value: ObservationFeatures | None) -> None:
         """
         Fixed generation features to pass into the Model's `.gen` function.
         """
@@ -106,12 +110,10 @@ class ModelSpec(SortableBase, SerializationMixin):
     @property
     def model_key(self) -> str:
         """Key string to identify the model used by this ``ModelSpec``."""
-        # NOTE: In the future, might need to add more to model key to make
-        # model specs with the same model (but different kwargs) easier to
-        # distinguish from their key. Could also add separate property, just
-        # `key` (for `ModelSpec.key`, which will be unique even between model
-        # specs with same model type).
-        return self.model_enum.value
+        if self.model_key_override is not None:
+            return self.model_key_override
+        else:
+            return self.model_enum.value
 
     def fit(
         self,
@@ -154,8 +156,8 @@ class ModelSpec(SortableBase, SerializationMixin):
 
     def cross_validate(
         self,
-        model_cv_kwargs: Optional[dict[str, Any]] = None,
-    ) -> tuple[Optional[list[CVResult]], Optional[CVDiagnostics]]:
+        model_cv_kwargs: dict[str, Any] | None = None,
+    ) -> tuple[list[CVResult] | None, CVDiagnostics | None]:
         """
         Call cross_validate, compute_diagnostics and cache the results.
         If the model cannot be cross validated, warn and return None.
@@ -194,7 +196,7 @@ class ModelSpec(SortableBase, SerializationMixin):
         return self._cv_results, self._diagnostics
 
     @property
-    def cv_results(self) -> Optional[list[CVResult]]:
+    def cv_results(self) -> list[CVResult] | None:
         """
         Cached CV results from `self.cross_validate()`
         if it has been successfully called
@@ -202,7 +204,7 @@ class ModelSpec(SortableBase, SerializationMixin):
         return self._cv_results
 
     @property
-    def diagnostics(self) -> Optional[CVDiagnostics]:
+    def diagnostics(self) -> CVDiagnostics | None:
         """
         Cached CV diagnostics from `self.cross_validate()`
         if it has been successfully called
@@ -231,6 +233,8 @@ class ModelSpec(SortableBase, SerializationMixin):
             kwargs_iterable=[self.model_gen_kwargs, model_gen_kwargs],
             keywords=get_function_argument_names(fitted_model.gen),
         )
+        # copy to ensure there is no in-place modification
+        model_gen_kwargs = deepcopy(model_gen_kwargs)
         generator_run = fitted_model.gen(**model_gen_kwargs)
         fit_and_std_quality_and_generalization_dict = (
             get_fit_and_std_quality_and_generalization_dict(
@@ -254,6 +258,7 @@ class ModelSpec(SortableBase, SerializationMixin):
             model_kwargs=deepcopy(self.model_kwargs),
             model_gen_kwargs=deepcopy(self.model_gen_kwargs),
             model_cv_kwargs=deepcopy(self.model_cv_kwargs),
+            model_key_override=self.model_key_override,
         )
 
     def _safe_to_update(
@@ -303,10 +308,11 @@ class ModelSpec(SortableBase, SerializationMixin):
         )
         return (
             "ModelSpec("
-            f"\tmodel_enum={self.model_enum.value},\n"
-            f"\tmodel_kwargs={model_kwargs},\n"
-            f"\tmodel_gen_kwargs={model_gen_kwargs},\n"
-            f"\tmodel_cv_kwargs={model_cv_kwargs},\n"
+            f"\tmodel_enum={self.model_enum.value}, "
+            f"\tmodel_kwargs={model_kwargs}, "
+            f"\tmodel_gen_kwargs={model_gen_kwargs}, "
+            f"\tmodel_cv_kwargs={model_cv_kwargs}, "
+            f"\tmodel_key_override={self.model_key_override}"
             ")"
         )
 
@@ -325,9 +331,9 @@ class ModelSpec(SortableBase, SerializationMixin):
 
 @dataclass
 class FactoryFunctionModelSpec(ModelSpec):
-    factory_function: Optional[TModelFactory] = None
+    factory_function: TModelFactory | None = None
     # pyre-ignore[15]: `ModelSpec` has this as non-optional
-    model_enum: Optional[ModelRegistryBase] = None
+    model_enum: ModelRegistryBase | None = None
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -342,36 +348,37 @@ class FactoryFunctionModelSpec(ModelSpec):
                 "as the required `factory_function` argument to "
                 "`FactoryFunctionModelSpec`."
             )
+        if self.model_key_override is None:
+            try:
+                # `model` is defined via a factory function.
+                # pyre-ignore[16]: Anonymous callable has no attribute `__name__`.
+                self.model_key_override = none_throws(self.factory_function).__name__
+            except Exception:
+                raise TypeError(
+                    f"{self.factory_function} is not a valid function, cannot extract "
+                    "name. Please provide the model name using `model_key_override`."
+                )
+
         warnings.warn(
             "Using a factory function to describe the model, so optimization state "
             "cannot be stored and optimization is not resumable if interrupted.",
+            AxWarning,
             stacklevel=3,
         )
-
-    @property
-    def model_key(self) -> str:
-        """Key string to identify the model used by this ``ModelSpec``."""
-        try:
-            # `model` is defined via a factory function.
-            return not_none(self.factory_function).__name__  # pyre-ignore[16]
-        except Exception:
-            raise TypeError(
-                f"{self.factory_function} is not a valid function, cannot extract name."
-            )
 
     def fit(
         self,
         experiment: Experiment,
         data: Data,
-        search_space: Optional[SearchSpace] = None,
-        optimization_config: Optional[OptimizationConfig] = None,
+        search_space: SearchSpace | None = None,
+        optimization_config: OptimizationConfig | None = None,
         **model_kwargs: Any,
     ) -> None:
         """Fits the specified model on the given experiment + data using the
         model kwargs set on the model spec, alongside any passed down as
         kwargs to this function (local kwargs take precedent)
         """
-        factory_function = not_none(self.factory_function)
+        factory_function = none_throws(self.factory_function)
         all_kwargs = deepcopy(self.model_kwargs)
         all_kwargs.update(model_kwargs)
         self._fitted_model = factory_function(
